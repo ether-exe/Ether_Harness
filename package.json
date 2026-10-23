@@ -1,0 +1,24 @@
+{
+	"name": "ether-harness",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"description": "Ether terminal chrome for pi: animated header, taskbar, Files, file preview, and side chat",
+	"keywords": [
+		"pi-package",
+		"pi-coding-agent",
+		"tui",
+		"terminal"
+	],
+	"license": "MIT",
+	"engines": {
+		"node": ">=22.19"
+	},
+	"scripts": {
+		"setup": "node install.mjs",
+		"install:harness": "node install.mjs",
+		"restore": "node install.mjs restore",
+		"doctor": "node doctor.mjs",
+		"test": "node tests/run-all.mjs"
+	}
+}

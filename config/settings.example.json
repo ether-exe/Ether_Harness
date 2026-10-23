@@ -1,0 +1,6 @@
+{
+	"theme": "Ether",
+	"defaultProvider": "deepseek",
+	"defaultModel": "deepseek-flash",
+	"defaultThinkingLevel": "max"
+}
