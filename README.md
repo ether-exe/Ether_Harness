@@ -4,8 +4,8 @@ A hand-built terminal chrome for [pi](https://pi.dev).
 
 Out of the box, pi is a single scrolling transcript. Ether turns it into a cockpit: an animated
 header with live session telemetry, a taskbar rail on the far left, a file tree, an IDE-style file
-preview, and an isolated side chat that never mixes with your main conversation. Everything works
-with the mouse or entirely from the keyboard.
+preview, an isolated side chat that never mixes with your main conversation, and a GitHub HUD fed
+by the connected `gh` CLI. Everything works with the mouse or entirely from the keyboard.
 
 This started as my personal setup and is shared as a working reference, not a polished product. If
 you want pi to look and behave differently, the tricks in here — wrapping the layout root, the theme
@@ -41,13 +41,20 @@ The pieces, briefly:
 - **Header (7 rows)** — braille wordmark, model, context bar, live spend, input/output tokens,
   session name, uptime. Fields drop whole from the right when the terminal narrows.
 - **Taskbar (5 cols)** — an icon rail that is always visible. `◫` collapses all side rails, `✦`
-  toggles just the side chat, and most other icons are honest about being inert.
+  toggles just the side chat, `⑂` toggles the GitHub rail alone, and most other icons are honest
+  about being inert.
 - **Files (24 cols)** — the session directory as a tree, auto-refreshing. Clicking a file opens the
   preview; the tree steps aside while it's open.
 - **Preview (47 cols)** — opens in the left slot with line numbers and soft-wrapped prose or
   Dracula-highlighted code. Refreshes on file change.
 - **Side chat (40 cols)** — a genuinely separate conversation with its own model. It sees its own
   history only, never the main transcript, and cannot touch your files.
+- **GitHub (38 cols)** — a read-only HUD from the connected `gh` CLI: a profile card, recent repos
+  (ten shown, up to 20 with a `⊞ N MORE` row), a 12-month contribution total with current-month
+  heatmap and exact active-day counts, streak, the latest commit per repo (ten shown, up to 12), and
+  a FEED of trending repos with total stars and click-to-expand READMEs. Opens with `⑂` or `alt+5`,
+  independent of the chat, so you can collapse whichever rail is hogging the transcript. Without
+  `gh` it shows a centered "No GitHub CLI connected" notice.
 - **Footer (4 rows)** — tokens, cost, model, queue, uptime, message and tool counts.
 
 ## Try it
@@ -73,7 +80,7 @@ the other theme, run `/settings` and pick `Bluether`.
 
 ```bash
 npm run restore              # undo: bring back the previous files
-npm test                     # run the seven test harnesses
+npm test                     # run the eight test harnesses
 npm test -- --filter keyboard
 ```
 
@@ -99,6 +106,7 @@ between rails and `esc` returns to the editor.
 | `alt+2` | Focus Files |
 | `alt+3` | Focus preview (needs an open file) |
 | `alt+4` | Focus side chat |
+| `alt+5` | Focus GitHub rail |
 | `alt+l` | Toggle side rails (same as `◫`) |
 
 Inside a rail, arrows or `j k` move, `pgup` / `pgdn` page, `home` / `end` jump, and `enter`
@@ -144,6 +152,12 @@ Honest ones:
 - The layout-root wrap uses a pi-internal API (`setLayoutRoot`) and may break on a future pi
   release. `doctor.mjs` warns when it finds a pi version this wasn't tested against.
 - Side-chat history is text-only; tool calls are not persisted across restarts.
+- The GitHub rail needs `gh` 2.x on PATH and a logged-in account. It caches for five minutes,
+  fetches up to 20 repos and 12 latest commits (ten of each shown by default), and never writes to
+  GitHub.
+- The FEED scrapes github.com/trending (no API), so a markup change can empty it; READMEs are
+  fetched only when you expand a repo and cached for the session.
+- With chat and GitHub both open, the transcript narrows; collapse either rail with `✦` or `⑂`.
 - The tests prove layout math, colors, keys, and focus. They cannot judge looks — that part needs
   your eyes.
 

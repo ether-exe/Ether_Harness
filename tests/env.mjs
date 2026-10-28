@@ -34,6 +34,11 @@ export const TEMP_ROOT = mkdtempSync(join(tmpdir(), "ether-harness-test-"));
 export const CONFIG = join(TEMP_ROOT, "chat-sidebar.json");
 process.env.ETHER_CHAT_CONFIG = CONFIG;
 
+/** Deterministic gh fixture; auth mode keeps existing tests off the network. */
+process.env.ETHER_GH_BIN ??= join(ROOT, "tests", "fixtures", "fake-gh.mjs");
+process.env.FAKE_GH_MODE ??= "auth";
+process.env.ETHER_TRENDING_JSON ??= join(ROOT, "tests", "fixtures", "trending.json");
+
 const jitiModule = await import(pathToFileURL(JITI).href);
 const themeModule = await import(
 	pathToFileURL(join(PI_ROOT, "dist", "modes", "interactive", "theme", "theme.js")).href

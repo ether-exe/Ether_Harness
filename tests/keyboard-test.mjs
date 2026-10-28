@@ -141,6 +141,12 @@ try {
 	check(raw.some((line) => line.includes(theme.getBgAnsi("selectedBg"))), "focused taskbar selection uses selectedBg");
 	taskbar.handleInput("\r");
 	check(notices.at(-1)?.message === "Extensions is not wired yet", "enter on an inert taskbar icon explains it is inert");
+	taskbar.selectedIcon = "⑂";
+	const githubBefore = tui.layoutRoot.entries.length;
+	taskbar.handleInput("\r");
+	check(tui.layoutRoot.entries.length === githubBefore + 1, "enter on the GitHub icon opens the rail");
+	taskbar.handleInput("\r");
+	check(tui.layoutRoot.entries.length === githubBefore, "enter on the GitHub icon collapses the rail");
 	taskbar.handleInput("\x1b[H");
 	check(taskbar.selectedIcon === "⌂", "home selects the first taskbar icon");
 	taskbar.handleInput("\x1b[F");

@@ -1,8 +1,8 @@
 /**
- * Ether chrome: animated session header, far-left taskbar, Files rail, and fixed RightsidebarA Chat.
+ * Ether chrome: animated session header, far-left taskbar, Files rail, side chat, and GitHub rail.
  *
  * Pi's TUI has no sidebar/header slots, so this wraps the fullscreen layout root:
- *   HStack( LeftSidebarA , LeftSidebarB/Files , VStack( header , app root ) , RightsidebarB , RightsidebarA )
+ *   HStack( LeftSidebarA , LeftSidebarB/Files , VStack( header , app root ) , RightsidebarA , RightsidebarC )
  * Files needs a wider terminal than the chat, so either rail can drop out independently.
  * The header sits above the app root and outside its ScrollView, so scrolling cannot move it.
  * Fullscreen mode only. Delete this file to get rid of everything.
@@ -14,6 +14,7 @@ import {
 	type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { execFile } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, closeSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -49,6 +50,23 @@ const CHAT_SIDEBAR_COMPACT_WIDTH = 36;
 const PREVIEW_SIDEBAR_WIDTH = Math.round(CHAT_SIDEBAR_WIDTH * 1.3 * 0.9);
 /** Below this total width the left preview cannot fit beside chat with a 40-col transcript. */
 const PREVIEW_MIN_TERMINAL = 132;
+/** RightSidebarC width: the GitHub rail, independent of the side chat. */
+const GITHUB_SIDEBAR_WIDTH = 38;
+/** Below this total width the GitHub rail is hidden so the transcript keeps usable columns. */
+const GITHUB_MIN_TERMINAL = 92;
+/** GitHub data is cached for five minutes; `r` refreshes immediately. */
+const GITHUB_CACHE_MS = 5 * 60_000;
+/** After a failed sync, wait this long before the ticker tries again. */
+const GITHUB_RETRY_MS = 20_000;
+const GITHUB_REPO_LIMIT = 20;
+const GITHUB_ACTIVITY_REPOS = 12;
+const GITHUB_VISIBLE_ITEMS = 10;
+const GITHUB_TIMEOUT_MS = 12_000;
+/** Trending is scraped from the public page; no official API exists. */
+const TRENDING_URL = "https://github.com/trending";
+const TRENDING_LIMIT = 5;
+const README_MAX_CHARS = 8000;
+const README_MAX_LINES = 80;
 const PREVIEW_MAX_BYTES = 1_000_000;
 const PREVIEW_MAX_LINES = 5000;
 const PREVIEW_TAB_SIZE = 4;
@@ -86,7 +104,7 @@ const CHAT_HISTORY_RESTORE_MESSAGES = 60;
 /** Far-left taskbar width; reserved for icon columns. */
 const LEFT_SIDEBAR_A_WIDTH = 5;
 /** Keyboard-addressable rails. The taskbar is always visible; the rest follow the viewport. */
-type RailKind = "taskbar" | "files" | "preview" | "chat";
+type RailKind = "taskbar" | "files" | "preview" | "chat" | "github";
 
 /** Shared keyboard-focus coordinator so every rail enters and leaves focus the same way. */
 interface RailNav {
@@ -98,7 +116,7 @@ interface RailNav {
 }
 
 /** Prototype first column in LeftSidebarA; the second column is intentionally empty. */
-type TaskbarAction = "layout" | "chat";
+type TaskbarAction = "layout" | "chat" | "github";
 
 interface TaskbarIcon {
 	readonly icon: string;
@@ -116,6 +134,7 @@ const TASKBAR_TOP_ICONS: readonly TaskbarIcon[] = [
 	{ icon: "⬡", label: "Extensions" },
 	{ icon: "◷", label: "History" },
 	{ icon: "✦", label: "AI", action: "chat" },
+	{ icon: "⑂", label: "GitHub", action: "github" },
 ];
 const TASKBAR_FOOTER_ICONS: readonly TaskbarIcon[] = [
 	{ icon: "⟳", label: "Reload" },
@@ -2634,6 +2653,852 @@ class EtherFooter implements Component {
 	}
 }
 
+/* ---------------------------------------------------------------- github */
+
+type GhErrorKind = "missing" | "auth" | "failed";
+
+/** Classified gh failure so the rail can show the right recovery hint. */
+class GhError extends Error {
+	readonly kind: GhErrorKind;
+
+	constructor(kind: GhErrorKind, message: string) {
+		super(message);
+		this.kind = kind;
+	}
+}
+
+interface GhProfile {
+	login: string;
+	name: string;
+	bio: string;
+	followers: number;
+	publicRepos: number;
+}
+
+interface GhRepo {
+	nameWithOwner: string;
+	description: string;
+	language: string;
+	stars: number;
+	updatedAt: string;
+	isPrivate: boolean;
+}
+
+interface GhActivity {
+	repo: string;
+	message: string;
+	sha: string;
+	date: string;
+}
+
+interface GhDay {
+	date: string;
+	count: number;
+}
+
+interface GhFeedItem {
+	name: string;
+	stars: number;
+	description: string;
+	language: string;
+	starsToday: number;
+}
+
+interface GhContributions {
+	total: number;
+	monthTotal: number;
+	monthLabel: string;
+	days: GhDay[];
+	streak: number;
+}
+
+interface GhSnapshot {
+	profile: GhProfile;
+	repos: GhRepo[];
+	activity: GhActivity[];
+	repoNote: string | null;
+	contributions: GhContributions | null;
+	contributionsNote: string | null;
+	feed: GhFeedItem[];
+	feedNote: string | null;
+	fetchedAt: number;
+}
+
+interface GhRunResult {
+	stdout: string;
+	stderr: string;
+	code: number;
+	missing: boolean;
+}
+
+/** Run the GitHub CLI without a shell. ETHER_GH_BIN points tests at a fixture. */
+function ghRun(args: readonly string[]): Promise<GhRunResult> {
+	const bin = process.env.ETHER_GH_BIN ?? "gh";
+	const script = /\.(mjs|cjs|js)$/i.test(bin);
+	const file = script ? process.execPath : bin;
+	const argv = script ? [bin, ...args] : [...args];
+	return new Promise((resolve) => {
+		execFile(
+			file,
+			argv,
+			{ timeout: GITHUB_TIMEOUT_MS, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
+			(error, stdout, stderr) => {
+				const failure = error as (NodeJS.ErrnoException & { code?: number | string }) | null;
+				const code = failure && typeof failure.code === "number" ? failure.code : failure ? 1 : 0;
+				resolve({
+					stdout: String(stdout ?? ""),
+					stderr: String(stderr ?? ""),
+					code,
+					missing: failure?.code === "ENOENT",
+				});
+			},
+		);
+	});
+}
+
+const MONTH_LABELS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"] as const;
+
+function formatAgo(iso: string): string {
+	const then = Date.parse(iso);
+	if (!Number.isFinite(then)) return "";
+	const seconds = Math.max(0, Math.floor((Date.now() - then) / 1000));
+	if (seconds < 60) return `${seconds}s`;
+	const minutes = Math.floor(seconds / 60);
+	if (minutes < 60) return `${minutes}m`;
+	const hours = Math.floor(minutes / 60);
+	if (hours < 24) return `${hours}h`;
+	const days = Math.floor(hours / 24);
+	if (days < 30) return `${days}d`;
+	const months = Math.floor(days / 30);
+	if (months < 12) return `${months}mo`;
+	return `${Math.floor(months / 12)}y`;
+}
+
+/** Plain-text README: strip HTML, links, emphasis, and control sequences. */
+function cleanReadme(raw: string): string {
+	let text = raw.replace(/\r\n?/g, "\n");
+	text = text.replace(/\t/g, "  ");
+	text = text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
+	text = text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, "");
+	text = text.replace(/!\[[^\]]*\]\([^)]*\)/g, "");
+	text = text.replace(/\[\s*\]\([^)]*\)/g, "");
+	text = text.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1");
+	text = text.replace(/<[^>]+>/g, "");
+	text = text.replace(/^\s*[-*_]{3,}\s*$/gm, "");
+	text = text.replace(/^\s{0,3}#{1,6}\s+/gm, "");
+	text = text.replace(/^\s{0,3}>\s?/gm, "");
+	text = text.replace(/^\s*[-*+]\s+/gm, "· ");
+	text = text.replace(/^\s*\d+\.\s+/gm, "· ");
+	text = text.replace(/\*\*([^*]+)\*\*/g, "$1");
+	text = text.replace(/[*_`]/g, "");
+	text = text.replace(/\n{3,}/g, "\n\n");
+	return text.trim().slice(0, README_MAX_CHARS);
+}
+
+/** GitHub has no trending API: parse the public page, with a JSON fixture for tests. */
+async function fetchTrending(): Promise<GhFeedItem[]> {
+	const fixture = process.env.ETHER_TRENDING_JSON;
+	if (fixture) {
+		const parsed = JSON.parse(readFileSync(fixture, "utf8")) as Array<Record<string, unknown>>;
+		return parsed
+			.slice(0, TRENDING_LIMIT)
+			.map((item) => ({
+				name: String(item.name ?? ""),
+				stars: Number(item.stars) || 0,
+				description: String(item.description ?? ""),
+				language: String(item.language ?? ""),
+				starsToday: Number(item.starsToday) || 0,
+			}))
+			.filter((item) => item.name.includes("/"));
+	}
+
+	const { body } = await webGet(TRENDING_URL);
+	const items: GhFeedItem[] = [];
+	for (const block of body.split(/<article class="Box-row"/).slice(1)) {
+		const name = /<h2[^>]*>[\s\S]*?<a[^>]*href="\/([^"]+)"/.exec(block)?.[1] ?? "";
+		if (!name.includes("/")) continue;
+		const description = /<p[^>]*class="[^"]*col-9[^"]*"[^>]*>([\s\S]*?)<\/p>/.exec(block)?.[1] ?? "";
+		const starAnchor = /<a[^>]+href="\/[^"]+\/stargazers"[^>]*>([\s\S]*?)<\/a>/.exec(block)?.[1] ?? "";
+		const stars = /([\d,]+)\s*$/.exec(starAnchor.replace(/<[^>]+>/g, "").trim())?.[1] ?? "0";
+		const language = /itemprop="programmingLanguage"[^>]*>([^<]+)</.exec(block)?.[1] ?? "";
+		const starsToday = /([\d,]+)\s+stars?\s+today/.exec(block)?.[1] ?? "0";
+		items.push({
+			name,
+			stars: Number(stars.replace(/,/g, "")) || 0,
+			description: webClean(description).replace(/\s+/g, " ").trim(),
+			language: webClean(language),
+			starsToday: Number(starsToday.replace(/,/g, "")) || 0,
+		});
+		if (items.length >= TRENDING_LIMIT) break;
+	}
+	if (items.length === 0) throw new Error("trending markup changed");
+	return items;
+}
+
+/** RightSidebarC: a read-only GitHub HUD backed by the connected `gh` CLI. */
+class EtherGithubSidebar implements Component {
+	private readonly tui: TUI;
+	private readonly getTheme: () => ThemeLike;
+	private readonly nav: RailNav;
+	private readonly isRailVisible: () => boolean;
+	focused = false;
+
+	private syncing = false;
+	private snapshot: GhSnapshot | null = null;
+	private errorKind: GhErrorKind | null = null;
+	private errorText = "";
+	private retryAt = 0;
+	private scrollOffset = 0;
+	private maxScroll = 0;
+	private reposExpanded = false;
+	private activityExpanded = false;
+	private readonly expandedFeed = new Set<string>();
+	private readonly readmeLoading = new Set<string>();
+	private readonly readmeCache = new Map<string, { text: string; error: boolean }>();
+	private readonly feedToggleRows = new Map<number, number>();
+	private readonly sectionToggleRows = new Map<number, "repos" | "activity">();
+
+	constructor(tui: TUI, getTheme: () => ThemeLike, nav: RailNav, isRailVisible: () => boolean) {
+		this.tui = tui;
+		this.getTheme = getTheme;
+		this.nav = nav;
+		this.isRailVisible = isRailVisible;
+	}
+
+	invalidate(): void {
+		// no cache: the ticker and sync state drive renders
+	}
+
+	/** Called from the animation clock; syncs lazily while the rail is visible. */
+	tick(): void {
+		if (!this.isRailVisible() || this.syncing) return;
+		if (this.errorKind && Date.now() < this.retryAt) return;
+		if (this.snapshot && Date.now() - this.snapshot.fetchedAt < GITHUB_CACHE_MS) return;
+		void this.sync(false);
+	}
+
+	private refresh(): void {
+		void this.sync(true);
+	}
+
+	private async sync(force: boolean): Promise<void> {
+		if (this.syncing) return;
+		if (!force && this.snapshot && Date.now() - this.snapshot.fetchedAt < GITHUB_CACHE_MS) return;
+		this.syncing = true;
+		this.errorKind = null;
+		this.errorText = "";
+		this.retryAt = 0;
+		this.tui.requestRender();
+		try {
+			const profile = await this.fetchProfile();
+			let repos: GhRepo[] = [];
+			let repoNote: string | null = null;
+			try {
+				repos = await this.fetchRepos();
+			} catch (error) {
+				if (error instanceof GhError && error.kind !== "failed") throw error;
+				repoNote = "repo list unavailable";
+			}
+			const activity = await this.fetchActivity(repos);
+			let contributions: GhContributions | null = null;
+			let contributionsNote: string | null = null;
+			try {
+				contributions = await this.fetchContributions();
+			} catch (error) {
+				if (error instanceof GhError && error.kind !== "failed") throw error;
+				contributionsNote = "contributions unavailable";
+			}
+			let feed: GhFeedItem[] = [];
+			let feedNote: string | null = null;
+			try {
+				feed = await fetchTrending();
+			} catch {
+				feedNote = "trending unavailable";
+			}
+			this.snapshot = {
+				profile,
+				repos,
+				activity,
+				repoNote,
+				contributions,
+				contributionsNote,
+				feed,
+				feedNote,
+				fetchedAt: Date.now(),
+			};
+			this.scrollOffset = 0;
+			this.prefetchFeed(feed);
+		} catch (error) {
+			if (error instanceof GhError) {
+				this.errorKind = error.kind;
+				this.errorText = error.message;
+			} else {
+				this.errorKind = "failed";
+				this.errorText = error instanceof Error ? error.message : String(error);
+			}
+			this.retryAt = Date.now() + GITHUB_RETRY_MS;
+			this.snapshot = null;
+		} finally {
+			this.syncing = false;
+			this.tui.requestRender();
+		}
+	}
+
+	private ensureOk(result: GhRunResult, what: string): string {
+		if (result.missing) throw new GhError("missing", "gh was not found on PATH");
+		if (result.code === 4 || /gh auth login/i.test(result.stderr)) {
+			throw new GhError("auth", "gh is installed but not logged in");
+		}
+		if (result.code !== 0) {
+			const reason = result.stderr.trim().split("\n")[0] || `exit ${result.code}`;
+			throw new GhError("failed", `${what}: ${reason}`);
+		}
+		return result.stdout;
+	}
+
+	private async fetchProfile(): Promise<GhProfile> {
+		const raw = JSON.parse(this.ensureOk(await ghRun(["api", "user"]), "profile")) as Record<string, unknown>;
+		const login = typeof raw.login === "string" ? raw.login : "";
+		if (!login) throw new GhError("failed", "GitHub returned no account");
+		return {
+			login,
+			name: typeof raw.name === "string" && raw.name.trim() ? raw.name.trim() : login,
+			bio: typeof raw.bio === "string" ? raw.bio.trim() : "",
+			followers: Number(raw.followers) || 0,
+			publicRepos: Number(raw.public_repos) || 0,
+		};
+	}
+
+	private async fetchRepos(): Promise<GhRepo[]> {
+		const raw = JSON.parse(
+			this.ensureOk(
+				await ghRun([
+					"repo",
+					"list",
+					"--limit",
+					String(GITHUB_REPO_LIMIT),
+					"--json",
+					"nameWithOwner,description,primaryLanguage,stargazerCount,updatedAt,isPrivate",
+				]),
+				"repos",
+			),
+		) as Array<Record<string, unknown>>;
+		if (!Array.isArray(raw)) throw new GhError("failed", "repo list returned no data");
+		return raw
+			.map((item) => {
+				const language = item.primaryLanguage as { name?: unknown } | null;
+				return {
+					nameWithOwner: String(item.nameWithOwner ?? ""),
+					description: typeof item.description === "string" ? item.description : "",
+					language: typeof language?.name === "string" ? language.name : "",
+					stars: Number(item.stargazerCount) || 0,
+					updatedAt: String(item.updatedAt ?? ""),
+					isPrivate: item.isPrivate === true,
+				};
+			})
+			.filter((repo) => repo.nameWithOwner);
+	}
+
+	private async fetchActivity(repos: readonly GhRepo[]): Promise<GhActivity[]> {
+		const results = await Promise.all(
+			repos.slice(0, GITHUB_ACTIVITY_REPOS).map(async (repo) => {
+				try {
+					const raw = JSON.parse(
+						this.ensureOk(await ghRun(["api", `repos/${repo.nameWithOwner}/commits?per_page=1`]), "commits"),
+					) as Array<Record<string, unknown>>;
+					const first = raw[0];
+					if (!first) return null;
+					const commit = first.commit as { message?: unknown; author?: { date?: unknown } } | undefined;
+					const message = typeof commit?.message === "string" ? (commit.message.split("\n")[0] ?? "").trim() : "";
+					if (!message) return null;
+					const activity: GhActivity = {
+						repo: repo.nameWithOwner,
+						message,
+						sha: String(first.sha ?? "").slice(0, 7),
+						date: typeof commit?.author?.date === "string" ? commit.author.date : "",
+					};
+					return activity;
+				} catch {
+					return null;
+				}
+			}),
+		);
+		return results
+			.filter((entry): entry is GhActivity => entry !== null)
+			.sort((a, b) => (Date.parse(b.date) || 0) - (Date.parse(a.date) || 0));
+	}
+
+	private async fetchContributions(): Promise<GhContributions> {
+		const now = new Date();
+		const from = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000);
+		const query =
+			"query($from: DateTime!, $to: DateTime!) { viewer { contributionsCollection(from: $from, to: $to) { restrictedContributionsCount contributionCalendar { totalContributions weeks { contributionDays { date contributionCount } } } } } }";
+		const raw = JSON.parse(
+			this.ensureOk(
+				await ghRun([
+					"api",
+					"graphql",
+					"-f",
+					`query=${query}`,
+					"-f",
+					`from=${from.toISOString()}`,
+					"-f",
+					`to=${now.toISOString()}`,
+				]),
+				"contributions",
+			),
+		) as {
+			data?: {
+				viewer?: {
+					contributionsCollection?: {
+						contributionCalendar?: {
+							totalContributions?: unknown;
+							weeks?: Array<{ contributionDays?: Array<{ date?: unknown; contributionCount?: unknown }> }>;
+						};
+					};
+				};
+			};
+		};
+		const calendar = raw.data?.viewer?.contributionsCollection?.contributionCalendar;
+		if (!calendar) throw new GhError("failed", "contribution calendar unavailable");
+		const days: GhDay[] = (calendar.weeks ?? [])
+			.flatMap((week) => week.contributionDays ?? [])
+			.map((day) => ({ date: String(day.date ?? ""), count: Number(day.contributionCount) || 0 }))
+			.filter((day) => /^\d{4}-\d{2}-\d{2}$/.test(day.date));
+		if (days.length === 0) throw new GhError("failed", "no contribution days returned");
+
+		const monthKey = now.toISOString().slice(0, 7);
+		const monthDays = days.filter((day) => day.date.startsWith(monthKey));
+		const monthTotal = monthDays.reduce((sum, day) => sum + day.count, 0);
+		const total = Number(calendar.totalContributions) || days.reduce((sum, day) => sum + day.count, 0);
+		const sorted = [...days].sort((a, b) => a.date.localeCompare(b.date));
+		let index = sorted.length - 1;
+		if (index >= 0 && sorted[index]!.count === 0) index -= 1;
+		let streak = 0;
+		while (index >= 0 && sorted[index]!.count > 0) {
+			streak += 1;
+			index -= 1;
+		}
+		return { total, monthTotal, monthLabel: MONTH_LABELS[now.getUTCMonth()] ?? "MON", days, streak };
+	}
+
+	/** Warm the README cache in the background so collapsed rows show an excerpt. */
+	private prefetchFeed(feed: readonly GhFeedItem[]): void {
+		for (const item of feed) void this.loadReadme(item);
+	}
+
+	/** Lazy README fetch, cached for the session; failures stay inside one feed item. */
+	private async loadReadme(item: GhFeedItem): Promise<void> {
+		if (this.readmeCache.has(item.name) || this.readmeLoading.has(item.name)) return;
+		this.readmeLoading.add(item.name);
+		this.tui.requestRender();
+		try {
+			const result = await ghRun([
+				"api",
+				`repos/${item.name}/readme`,
+				"-H",
+				"Accept: application/vnd.github.raw",
+			]);
+			const text = cleanReadme(this.ensureOk(result, "readme"));
+			this.readmeCache.set(item.name, { text: text || "This repository has no README.", error: false });
+		} catch (error) {
+			const missing = error instanceof GhError && error.kind === "missing";
+			this.readmeCache.set(item.name, {
+				text: missing ? "gh is not available" : "README unavailable",
+				error: true,
+			});
+		} finally {
+			this.readmeLoading.delete(item.name);
+			this.tui.requestRender();
+		}
+	}
+
+	private matte(theme: ThemeLike, text: string): string {
+		return theme.bg("toolPendingBg", text);
+	}
+
+	private fit(theme: ThemeLike, content: string, fill: number): string {
+		let line = content;
+		if (visibleWidth(line) > fill) line = truncateToWidth(line, fill, "…");
+		line += " ".repeat(Math.max(0, fill - visibleWidth(line)));
+		return this.matte(theme, line);
+	}
+
+	private header(theme: ThemeLike, fill: number): string {
+		const title = ` ${theme.fg("toolTitle", "◢")} ${theme.fg("accent", "GITHUB")}`;
+		const status = this.syncing
+			? `${theme.fg("toolTitle", SPINNER[tick % SPINNER.length]!)} ${theme.fg("dim", "SYNC")}`
+			: this.snapshot
+				? theme.fg("dim", `LINK ${formatAgo(new Date(this.snapshot.fetchedAt).toISOString())}`)
+				: theme.fg("dim", "STANDBY");
+		const hints: string[] = [];
+		if (this.maxScroll > 0) hints.push("↕");
+		if (this.focused) hints.push("esc");
+		const hint = hints.length > 0 ? theme.fg("dim", hints.join(" ")) : "";
+		const right = hint ? `${status} ${hint}` : status;
+		const gap = Math.max(1, fill - visibleWidth(title) - visibleWidth(right));
+		return this.fit(theme, title + " ".repeat(gap) + right, fill);
+	}
+
+	private footer(theme: ThemeLike, fill: number): string {
+		const left = this.syncing
+			? `${theme.fg("toolTitle", SPINNER[tick % SPINNER.length]!)} ${theme.fg("dim", "SYNCING")}`
+			: this.snapshot
+				? `${theme.fg("success", "●")} ${theme.fg("dim", `SYNCED ${formatAgo(new Date(this.snapshot.fetchedAt).toISOString())}`)}`
+				: `${theme.fg("dim", "○ OFFLINE")}`;
+		const right = this.focused ? theme.fg("dim", "r refresh") : "";
+		const gap = Math.max(1, fill - visibleWidth(left) - visibleWidth(right));
+		return this.fit(theme, left + " ".repeat(gap) + right, fill);
+	}
+
+	/** Centered empty/loading/error state: title, detail lines, and a recovery hint. */
+	private center(
+		theme: ThemeLike,
+		fill: number,
+		height: number,
+		block: ReadonlyArray<{ text: string; tone: string }>,
+	): string[] {
+		const width = Math.max(4, fill - 4);
+		const lines = block.flatMap(({ text, tone }) => {
+			const wrapped = wrapTextWithAnsi(text, width);
+			return (wrapped.length > 0 ? wrapped : [""]).map((line) => {
+				const clipped = truncateToWidth(line, Math.max(1, fill - 2), "…");
+				const painted = theme.fg(tone, clipped);
+				const pad = Math.max(0, Math.floor((fill - visibleWidth(painted)) / 2));
+				return this.matte(theme, " ".repeat(pad) + painted + " ".repeat(Math.max(0, fill - pad - visibleWidth(painted))));
+			});
+		});
+		const top = Math.max(0, Math.floor((height - lines.length) / 2));
+		const out: string[] = [];
+		for (let row = 0; row < height; row++) {
+			const index = row - top;
+			out.push(index >= 0 && index < lines.length ? lines[index]! : this.matte(theme, " ".repeat(fill)));
+		}
+		return out;
+	}
+
+	private profileCard(theme: ThemeLike, fill: number): string[] {
+		const snap = this.snapshot!;
+		const boxWidth = Math.max(14, Math.min(fill - 2, 34));
+		const inner = boxWidth - 2;
+		const left = Math.max(0, Math.floor((fill - boxWidth) / 2));
+		const right = Math.max(0, fill - left - boxWidth);
+		const border = (text: string) => theme.fg("borderMuted", text);
+		const line = (content: string) => this.matte(theme, " ".repeat(left) + content + " ".repeat(right));
+		const body = (content: string) => {
+			const clipped = truncateToWidth(content, Math.max(1, inner - 4), "…");
+			const pad = Math.max(0, inner - 2 - visibleWidth(clipped));
+			return line(border("│") + "  " + clipped + " ".repeat(pad) + border("│"));
+		};
+		const name = [...snap.profile.name].join(" ");
+		return [
+			line(border(`╭${"─".repeat(Math.max(0, boxWidth - 2))}╮`)),
+			body(theme.style(name, { fg: "accent", bold: true })),
+			body(`${theme.fg("dim", "@")}${theme.fg("toolTitle", snap.profile.login)}`),
+			body(theme.fg("dim", `${snap.profile.publicRepos} public · ${snap.profile.followers} followers`)),
+			line(border(`╰${"─".repeat(Math.max(0, boxWidth - 2))}╯`)),
+		];
+	}
+
+	private contributionLines(theme: ThemeLike, fill: number): string[] {
+		const snap = this.snapshot!;
+		const contrib = snap.contributions;
+		if (!contrib) {
+			return [this.fit(theme, `  ${theme.fg("dim", snap.contributionsNote ?? "contributions unavailable")}`, fill)];
+		}
+		const rows: string[] = [];
+		const row = (content: string) => rows.push(this.fit(theme, content, fill));
+		const total = `  ${theme.fg("muted", "TOTAL")} ${theme.fg("accent", formatTokens(contrib.total))}`;
+		const window = theme.fg("dim", "12 MO");
+		const gap = Math.max(1, fill - visibleWidth(total) - visibleWidth(window) - 2);
+		row(total + " ".repeat(gap) + window);
+		row(
+			`  ${theme.fg("muted", contrib.monthLabel)} ${theme.fg("text", formatTokens(contrib.monthTotal))} ${theme.fg("dim", "·")} ${theme.fg("muted", "STREAK")} ${theme.fg("text", contrib.streak > 0 ? `${contrib.streak}d` : "—")}`,
+		);
+
+		const now = new Date();
+		const year = now.getUTCFullYear();
+		const month = now.getUTCMonth();
+		const firstWeekday = new Date(Date.UTC(year, month, 1)).getUTCDay();
+		const daysInMonth = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+		const counts = new Map(contrib.days.map((day) => [day.date, day.count]));
+		const glyph = (count: number): string => {
+			if (count <= 0) return theme.fg("dim", "·");
+			if (count <= 2) return theme.fg("muted", "▁");
+			if (count <= 5) return theme.fg("toolTitle", "▃");
+			if (count <= 9) return theme.fg("toolTitle", "▅");
+			return theme.fg("accent", "█");
+		};
+		const center = (content: string) => {
+			const pad = Math.max(0, Math.floor((fill - visibleWidth(content)) / 2));
+			return this.fit(theme, " ".repeat(pad) + content, fill);
+		};
+		rows.push(center(["S", "M", "T", "W", "T", "F", "S"].map((day) => theme.fg("dim", `${day} `)).join("")));
+		const weeks = Math.ceil((firstWeekday + daysInMonth) / 7);
+		for (let week = 0; week < weeks; week++) {
+			let line = "";
+			for (let column = 0; column < 7; column++) {
+				const dayNumber = week * 7 + column - firstWeekday + 1;
+				if (dayNumber < 1 || dayNumber > daysInMonth) {
+					line += "  ";
+					continue;
+				}
+				const date = `${year}-${String(month + 1).padStart(2, "0")}-${String(dayNumber).padStart(2, "0")}`;
+				line += `${glyph(counts.get(date) ?? 0)} `;
+			}
+			rows.push(center(line));
+		}
+
+		const active = contrib.days
+			.filter((day) => day.date.startsWith(now.toISOString().slice(0, 7)) && day.count > 0)
+			.sort((a, b) => b.date.localeCompare(a.date))
+			.slice(0, 5)
+			.map((day) => `${day.date.slice(8, 10)}·${day.count}`)
+			.join("  ");
+		row(`  ${theme.fg("muted", "ACTIVE")}  ${theme.fg("dim", active || "none")}`);
+		row(`  ${theme.fg("dim", "LESS  · ▁ ▃ ▅ █  MORE")}`);
+		return rows;
+	}
+
+	private sections(theme: ThemeLike, fill: number): string[] {
+		const snap = this.snapshot!;
+		const rows: string[] = [];
+		this.feedToggleRows.clear();
+		this.sectionToggleRows.clear();
+		const row = (content: string) => rows.push(this.fit(theme, content, fill));
+		const blank = () => row("");
+		const cap = (label: string) => row(` ${theme.fg("toolTitle", "◢")} ${theme.fg("muted", label)}`);
+		const toggle = (kind: "repos" | "activity", expanded: boolean, total: number) => {
+			if (total <= GITHUB_VISIBLE_ITEMS) return;
+			const icon = expanded ? "⊟" : "⊞";
+			const label = expanded ? "LESS" : `${total - GITHUB_VISIBLE_ITEMS} MORE`;
+			this.sectionToggleRows.set(rows.length, kind);
+			row(`  ${theme.fg("toolTitle", icon)} ${theme.fg("dim", label)}`);
+		};
+
+		cap("OPERATOR");
+		for (const line of this.profileCard(theme, fill)) rows.push(line);
+		if (snap.profile.bio) {
+			const wrapped = wrapTextWithAnsi(snap.profile.bio, Math.max(4, fill - 4)).slice(0, 3);
+			for (const line of wrapped) row(`    ${theme.fg("dim", line)}`);
+		}
+
+		blank();
+		cap("REPOS");
+		if (snap.repos.length === 0) row(`  ${theme.fg("dim", snap.repoNote ?? "no repositories")}`);
+		const visibleRepos = this.reposExpanded ? snap.repos : snap.repos.slice(0, GITHUB_VISIBLE_ITEMS);
+		for (const repo of visibleRepos) {
+			row(`  ${theme.fg("toolTitle", "▸")} ${theme.fg("accent", repo.nameWithOwner)}`);
+			if (repo.description) {
+				const wrapped = wrapTextWithAnsi(repo.description, Math.max(4, fill - 6)).slice(0, 2);
+				for (const line of wrapped) row(`      ${theme.fg("dim", line)}`);
+			}
+			const lang = repo.language
+				? `${theme.fg("toolTitle", "●")} ${theme.fg("muted", repo.language)}`
+				: `${theme.fg("dim", "○")}`;
+			const privacy = repo.isPrivate ? ` ${theme.fg("dim", "·")} ${theme.fg("dim", "private")}` : "";
+			const stars = repo.stars > 0 ? ` ${theme.fg("dim", "·")} ${theme.fg("dim", `★ ${repo.stars}`)}` : "";
+			const age = repo.updatedAt ? ` ${theme.fg("dim", "·")} ${theme.fg("dim", formatAgo(repo.updatedAt))}` : "";
+			row(`      ${lang}${privacy}${stars}${age}`);
+		}
+		if (snap.repoNote && snap.repos.length > 0) row(`  ${theme.fg("dim", snap.repoNote)}`);
+		toggle("repos", this.reposExpanded, snap.repos.length);
+
+		blank();
+		cap("CONTRIBUTIONS");
+		for (const line of this.contributionLines(theme, fill)) rows.push(line);
+
+		blank();
+		cap("ACTIVITY");
+		if (snap.activity.length === 0) row(`  ${theme.fg("dim", "no recent commits")}`);
+		const visibleActivity = this.activityExpanded ? snap.activity : snap.activity.slice(0, GITHUB_VISIBLE_ITEMS);
+		for (const entry of visibleActivity) {
+			row(`  ${theme.fg("toolTitle", "●")} ${theme.fg("muted", entry.repo)}`);
+			row(`    ${theme.fg("text", entry.message)}`);
+			row(`    ${theme.fg("dim", `${entry.sha || "—"} · ${formatAgo(entry.date)}`)}`);
+		}
+		toggle("activity", this.activityExpanded, snap.activity.length);
+
+		blank();
+		cap("FEED");
+		if (snap.feed.length === 0) row(`  ${theme.fg("dim", snap.feedNote ?? "no trending repos")}`);
+		snap.feed.forEach((item, feedIndex) => {
+			const expanded = this.expandedFeed.has(item.name);
+			const icon = expanded ? "⊟" : "⊞";
+			const stars = `★ ${formatTokens(item.stars)}`;
+			const nameWidth = Math.max(6, fill - visibleWidth(stars) - 10);
+			const left = `  ${theme.fg("toolTitle", "▸")} ${theme.fg("accent", truncateToWidth(item.name, nameWidth, "…"))}`;
+			const gap = Math.max(1, fill - visibleWidth(left) - visibleWidth(stars) - 2);
+			this.feedToggleRows.set(rows.length, feedIndex);
+			row(`${left}${" ".repeat(gap)}${theme.fg("dim", stars)} ${theme.fg("toolTitle", icon)}`);
+			const cachedReadme = this.readmeCache.get(item.name);
+			const short = cachedReadme && !cachedReadme.error
+				? cachedReadme.text.split("\n").map((line) => line.trim()).filter(Boolean).slice(0, 2).join("\n")
+				: item.description;
+			if (short) {
+				const wrapped = wrapTextWithAnsi(short, Math.max(6, fill - 4)).slice(0, 2);
+				for (const line of wrapped) row(`    ${theme.fg("dim", line)}`);
+			}
+			const meta: string[] = [];
+			if (item.starsToday > 0) meta.push(`↑${formatTokens(item.starsToday)} today`);
+			if (item.language) meta.push(item.language);
+			if (meta.length > 0) row(`    ${theme.fg("dim", meta.join(" · "))}`);
+			if (expanded) {
+				if (this.readmeLoading.has(item.name)) {
+					row(`    ${theme.fg("dim", "fetching readme…")}`);
+				} else {
+					const cached = this.readmeCache.get(item.name);
+					if (!cached) {
+						row(`    ${theme.fg("dim", "readme unavailable")}`);
+					} else {
+						let emitted = 0;
+						for (const source of cached.text.split("\n")) {
+							if (emitted >= README_MAX_LINES) break;
+							const wrapped = wrapTextWithAnsi(source, Math.max(6, fill - 4));
+							for (const line of wrapped.length > 0 ? wrapped : [""]) {
+								row(`    ${theme.fg(cached.error ? "error" : "dim", line)}`);
+								emitted += 1;
+								if (emitted >= README_MAX_LINES) break;
+							}
+						}
+						if (emitted >= README_MAX_LINES) row(`    ${theme.fg("dim", "… truncated")}`);
+					}
+				}
+			}
+			if (feedIndex < snap.feed.length - 1) blank();
+		});
+		return rows;
+	}
+
+	private renderBody(theme: ThemeLike, fill: number, height: number): string[] {
+		if (this.errorKind || !this.snapshot) {
+			if (this.errorKind) {
+				const title = "No GitHub CLI connected";
+				const detail =
+					this.errorKind === "missing"
+						? "gh was not found on PATH. Install the GitHub CLI, then reopen this rail."
+						: this.errorKind === "auth"
+							? "gh is installed but not logged in. Run gh auth login in a terminal."
+							: this.errorText || "The GitHub request failed.";
+				const hint = this.focused ? "r to retry" : "click the icon to retry";
+				return this.center(theme, fill, height, [
+					{ text: title, tone: "accent" },
+					{ text: detail, tone: "dim" },
+					{ text: hint, tone: "toolTitle" },
+				]);
+			}
+			return this.center(theme, fill, height, [
+				{ text: this.syncing ? "SYNCING GITHUB" : "GITHUB OFFLINE", tone: "accent" },
+				{ text: this.syncing ? `${SPINNER[tick % SPINNER.length]} establishing the link` : "waiting for first sync", tone: "dim" },
+			]);
+		}
+
+		const content = this.sections(theme, fill);
+		this.maxScroll = Math.max(0, content.length - height);
+		this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, this.maxScroll));
+		const visible = content.slice(this.scrollOffset, this.scrollOffset + height);
+		while (visible.length < height) visible.push(this.matte(theme, " ".repeat(fill)));
+		return visible;
+	}
+
+	render(width: number): string[] {
+		if (width <= 0) return [];
+		const theme = this.getTheme();
+		const rows = Math.max(1, this.tui.terminal?.rows ?? 24);
+		const fill = Math.max(0, width - 1);
+		const bodyHeight = Math.max(0, rows - 4);
+		const edge = this.matte(theme, theme.fg("borderMuted", "│"));
+		const rule = this.matte(theme, theme.fg("borderMuted", "├" + "─".repeat(Math.max(0, fill - 1))));
+		const body = this.renderBody(theme, fill, bodyHeight);
+		return [this.header(theme, fill), rule, ...body, rule, this.footer(theme, fill)].map((line) => edge + line);
+	}
+
+	private scrollBy(delta: number): void {
+		this.scrollOffset = Math.max(0, Math.min(this.maxScroll, this.scrollOffset + delta));
+		this.tui.requestRender();
+	}
+
+	handleInput(data: string): void {
+		if (matchesKey(data, "tab")) {
+			this.nav.cycle(1);
+			return;
+		}
+		if (matchesKey(data, "shift+tab")) {
+			this.nav.cycle(-1);
+			return;
+		}
+		if (matchesKey(data, "escape")) {
+			this.nav.leave();
+			return;
+		}
+		if (matchesKey(data, "up") || matchesKey(data, "k")) {
+			this.scrollBy(-1);
+			return;
+		}
+		if (matchesKey(data, "down") || matchesKey(data, "j")) {
+			this.scrollBy(1);
+			return;
+		}
+		const rows = Math.max(1, this.tui.terminal?.rows ?? 24);
+		const page = Math.max(1, rows - 6);
+		if (matchesKey(data, "pageUp")) {
+			this.scrollBy(-page);
+			return;
+		}
+		if (matchesKey(data, "pageDown")) {
+			this.scrollBy(page);
+			return;
+		}
+		if (matchesKey(data, "home")) {
+			this.scrollBy(-this.maxScroll);
+			return;
+		}
+		if (matchesKey(data, "end")) {
+			this.scrollBy(this.maxScroll);
+			return;
+		}
+		if (matchesKey(data, "r")) this.refresh();
+	}
+
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (event.type === "wheel") {
+			const delta = Math.trunc(event.wheelDelta ?? 0);
+			if (delta === 0) return undefined;
+			this.scrollBy(delta);
+			return { handled: true };
+		}
+		if (event.button !== "left") return undefined;
+		const width = event.width || this.tui.terminal?.columns || 0;
+		const rows = Math.max(1, this.tui.terminal?.rows ?? 24);
+		if (event.y < 2 || event.y >= rows - 2) return undefined;
+		const contentRow = this.scrollOffset + (event.y - 2);
+		const section = this.sectionToggleRows.get(contentRow);
+		if (section) {
+			if (event.type === "press") return { handled: true, render: false };
+			if (event.type !== "click") return undefined;
+			if (section === "repos") this.reposExpanded = !this.reposExpanded;
+			else this.activityExpanded = !this.activityExpanded;
+			this.tui.requestRender();
+			return { handled: true };
+		}
+		if (event.x < width - 2) return undefined;
+		const feedIndex = this.feedToggleRows.get(contentRow);
+		if (feedIndex === undefined) return undefined;
+		const item = this.snapshot?.feed[feedIndex];
+		if (!item) return undefined;
+		if (event.type === "press") return { handled: true, render: false };
+		if (event.type !== "click") return undefined;
+		if (this.expandedFeed.has(item.name)) {
+			this.expandedFeed.delete(item.name);
+		} else {
+			this.expandedFeed.add(item.name);
+			void this.loadReadme(item);
+		}
+		this.tui.requestRender();
+		return { handled: true };
+	}
+}
+
 /* ------------------------------------------------------------------ install */
 
 /** Minimal shapes for the provider-neutral stream the side chat consumes. */
@@ -2661,9 +3526,11 @@ interface LiveChrome {
 	ticker?: ReturnType<typeof setInterval>;
 	sidebarsCollapsed?: boolean;
 	chatCollapsed?: boolean;
+	githubCollapsed?: boolean;
 	activeFile?: string | null;
 	chatModel?: ChatModelRef | null;
 	chatSidebar?: { syncVisibility(): void };
+	githubSidebar?: { tick(): void };
 	railNav?: RailNav;
 	focusRail?: (kind: RailKind) => void;
 	toggleLayout?: () => void;
@@ -2690,6 +3557,7 @@ function installChrome(live: LiveChrome): void {
 	// Reinstall whenever a new extension runtime drives the same renderer (/reload).
 	// A version number is not enough: the old components keep a stale, invalidated ctx.
 	if (t.__etherChromeOwner === live) return;
+	if (live.githubCollapsed === undefined) live.githubCollapsed = true;
 
 	const original = proto.setLayoutRoot.bind(t);
 	// Older versions wrapped as HStack([rail, appRoot]); adopt the inner root instead of nesting.
@@ -2730,6 +3598,7 @@ function installChrome(live: LiveChrome): void {
 	let filesSidebar: EtherFilesSidebar | null = null;
 	let chatSidebar: EtherChatSidebar | null = null;
 	let previewSidebar: EtherPreviewSidebar | null = null;
+	let githubSidebar: EtherGithubSidebar | null = null;
 	let editorFocus: Component | null = null;
 
 	const isRail = (component: Component | null | undefined): boolean =>
@@ -2737,7 +3606,8 @@ function installChrome(live: LiveChrome): void {
 		(component === taskbarSidebar ||
 			component === filesSidebar ||
 			component === chatSidebar ||
-			component === previewSidebar);
+			component === previewSidebar ||
+			component === githubSidebar);
 
 	const focusedComponent = (): Component | null =>
 		(tui as unknown as { getFocusedComponent?: () => Component | null }).getFocusedComponent?.() ?? null;
@@ -2751,6 +3621,7 @@ function installChrome(live: LiveChrome): void {
 		if (rail === taskbarSidebar) return true;
 		if (live.sidebarsCollapsed) return false;
 		if (rail === chatSidebar) return !live.chatCollapsed && width >= CHAT_MIN_TERMINAL;
+		if (rail === githubSidebar) return !live.githubCollapsed && width >= GITHUB_MIN_TERMINAL;
 		if (rail === previewSidebar) return !!live.activeFile && width >= PREVIEW_MIN_TERMINAL;
 		if (rail === filesSidebar) {
 			const previewVisible = !!live.activeFile && width >= PREVIEW_MIN_TERMINAL;
@@ -2765,6 +3636,7 @@ function installChrome(live: LiveChrome): void {
 		if (previewSidebar && railVisible(previewSidebar)) order.push(previewSidebar);
 		if (filesSidebar && railVisible(filesSidebar)) order.push(filesSidebar);
 		if (chatSidebar && railVisible(chatSidebar)) order.push(chatSidebar);
+		if (githubSidebar && railVisible(githubSidebar)) order.push(githubSidebar);
 		return order;
 	};
 
@@ -2858,8 +3730,30 @@ function installChrome(live: LiveChrome): void {
 		tui.requestRender();
 	};
 
+	/** Toggle only the GitHub rail. Independent of the side chat, so both can be open. */
+	const toggleGithub = (): void => {
+		const focused = focusedComponent();
+		const width = tui.terminal?.columns ?? 0;
+		const visible = !live.sidebarsCollapsed && !live.githubCollapsed && width >= GITHUB_MIN_TERMINAL;
+		if (visible) {
+			live.githubCollapsed = true;
+		} else {
+			if (width < GITHUB_MIN_TERMINAL) {
+				notify(`github needs at least ${GITHUB_MIN_TERMINAL} columns`);
+				return;
+			}
+			live.githubCollapsed = false;
+			live.sidebarsCollapsed = false;
+		}
+		if (baseRoot) t.setLayoutRoot(baseRoot);
+		if (focused && isRail(focused) && !railVisible(focused)) nav.leave();
+		if (!live.githubCollapsed) githubSidebar?.tick();
+		tui.requestRender();
+	};
+
 	const handleTaskbarAction = (action: TaskbarAction): void => {
 		if (action === "chat") toggleChat();
+		else if (action === "github") toggleGithub();
 		else toggleLayout();
 	};
 	const handleInertIcon = (item: TaskbarIcon): void => {
@@ -2880,6 +3774,10 @@ function installChrome(live: LiveChrome): void {
 			notify(`chat needs at least ${CHAT_MIN_TERMINAL} columns`);
 			return;
 		}
+		if (kind === "github" && width < GITHUB_MIN_TERMINAL) {
+			notify(`github needs at least ${GITHUB_MIN_TERMINAL} columns`);
+			return;
+		}
 		if (kind === "files" && width < FILES_MIN_TERMINAL) {
 			notify(`Files needs at least ${FILES_MIN_TERMINAL} columns`);
 			return;
@@ -2891,6 +3789,10 @@ function installChrome(live: LiveChrome): void {
 		let changed = false;
 		if (kind === "chat" && live.chatCollapsed) {
 			live.chatCollapsed = false;
+			changed = true;
+		}
+		if (kind === "github" && live.githubCollapsed) {
+			live.githubCollapsed = false;
 			changed = true;
 		}
 		if (kind !== "taskbar" && live.sidebarsCollapsed) {
@@ -2905,7 +3807,9 @@ function installChrome(live: LiveChrome): void {
 					? filesSidebar
 					: kind === "preview"
 						? previewSidebar
-						: chatSidebar;
+						: kind === "chat"
+							? chatSidebar
+							: githubSidebar;
 		if (!target || !railVisible(target)) {
 			notify(`${kind}: rail is not available`);
 			return;
@@ -2925,6 +3829,13 @@ function installChrome(live: LiveChrome): void {
 		nav,
 	);
 	live.chatSidebar = chatSidebar;
+	githubSidebar = new EtherGithubSidebar(
+		tui,
+		getTheme,
+		nav,
+		() => !live.sidebarsCollapsed && !live.githubCollapsed && (tui.terminal?.columns ?? 0) >= GITHUB_MIN_TERMINAL,
+	);
+	live.githubSidebar = githubSidebar;
 	previewSidebar = new EtherPreviewSidebar(
 		tui,
 		getTheme,
@@ -2980,9 +3891,19 @@ function installChrome(live: LiveChrome): void {
 			minSize: 0,
 			visible: (viewport: { width: number }) => !!live.activeFile && viewport.width >= PREVIEW_MIN_TERMINAL,
 		};
+		const githubRail = {
+			// RightSidebarC: the GitHub HUD, independent of the chat rail.
+			component: githubSidebar!,
+			basis: GITHUB_SIDEBAR_WIDTH,
+			grow: 0,
+			shrink: 0,
+			minSize: 0,
+			visible: (viewport: { width: number }) => !live.githubCollapsed && viewport.width >= GITHUB_MIN_TERMINAL,
+		};
 		// Side rails toggle with ◫; LeftSidebarA always survives. The AI icon toggles chat alone.
 		const showRails = !live.sidebarsCollapsed;
 		const showChat = showRails && !live.chatCollapsed;
+		const showGithub = showRails && !live.githubCollapsed;
 		return new HStack([
 			{
 				// LeftSidebarA: far-left taskbar, always visible even when the other rails hide.
@@ -2997,6 +3918,7 @@ function installChrome(live: LiveChrome): void {
 			...(showRails ? [filesRail] : []),
 			{ component: chatColumn, basis: 0, grow: 1, shrink: 1, minSize: 1 },
 			...(showChat ? [chatRail] : []),
+			...(showGithub ? [githubRail] : []),
 		]);
 	};
 
@@ -3249,6 +4171,7 @@ export default function etherChrome(pi: ExtensionAPI): void {
 		bind(Key.alt("2"), "Focus the Files rail", () => live.focusRail?.("files"));
 		bind(Key.alt("3"), "Focus the file preview", () => live.focusRail?.("preview"));
 		bind(Key.alt("4"), "Focus the side chat", () => live.focusRail?.("chat"));
+		bind(Key.alt("5"), "Focus the GitHub rail", () => live.focusRail?.("github"));
 		bind(Key.alt("l"), "Toggle the side rails", () => live.toggleLayout?.());
 	}
 
@@ -3329,7 +4252,10 @@ export default function etherChrome(pi: ExtensionAPI): void {
 					const previewVisible = !!live.activeFile && width >= PREVIEW_MIN_TERMINAL;
 					return {
 						left: shown && (previewVisible || width >= FILES_MIN_TERMINAL),
-						right: shown && !live.chatCollapsed && width >= CHAT_MIN_TERMINAL,
+						right:
+							shown &&
+							((!live.chatCollapsed && width >= CHAT_MIN_TERMINAL) ||
+								(!live.githubCollapsed && width >= GITHUB_MIN_TERMINAL)),
 					};
 				},
 				footerData,
@@ -3341,6 +4267,7 @@ export default function etherChrome(pi: ExtensionAPI): void {
 			live.ticker = setInterval(() => {
 				tick += 1;
 				live.chatSidebar?.syncVisibility();
+				live.githubSidebar?.tick();
 				live.railNav?.ensureFocusVisible();
 				live.tui?.requestRender();
 			}, TICK_MS);

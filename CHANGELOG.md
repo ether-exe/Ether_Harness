@@ -2,6 +2,34 @@
 
 All notable changes to the Ether Harness.
 
+## 0.2.1 — 2026-10-28
+
+### Added
+
+- Taskbar `⑂` GitHub icon (row 19) opening a new 38-column right rail, independent of the side
+  chat. `⑂` or `alt+5` toggles it; both right rails can be open, and collapsing either reclaims
+  transcript width.
+- GitHub HUD fed by the connected `gh` CLI: a profile card with a bold, letter-spaced name, a
+  12-month contribution total, current-month heatmap, exact active-day counts, streak, recent repos
+  (language, privacy, stars, age), the latest commit per repo, and a FEED of trending repos with
+  total stars, stars today, and a two-line README excerpt. Five-minute cache, `r` refreshes.
+- REPOS and ACTIVITY show ten rows by default. When there are more, a `⊞ N MORE` row expands the
+  section up to 20 repos / 12 activity entries, and `⊟ LESS` collapses it back.
+- `FEED` under ACTIVITY: five trending repos from `github.com/trending`. `⊞` expands the full
+  README; `⊟` collapses it. READMEs are prefetched in the background, stripped to text, and cached
+  for the session. Trending failures degrade to `trending unavailable` and do not affect the rest
+  of the rail.
+- Read-only `gh` calls through `execFile` (12 s timeout, no shell, no token access). Identity, empty,
+  logged-out, missing-binary, and API-error states; failures show a centered "No GitHub CLI
+  connected" notice with a cause-specific hint.
+- `ETHER_GH_BIN` override plus `tests/fixtures/fake-gh.mjs`, so the rail is tested without network
+  or a real account. New `github-rail` harness covers toggles, sync, repo/activity expansion, feed
+  README expand/collapse, both-rail layout, `alt+5`, and the auth/missing states.
+
+### Verification
+
+- `npm test` — 8/8 harnesses pass.
+
 ## 0.2.0 — 2026-10-27
 
 Installed and refined on macOS with pi 1.4.0.

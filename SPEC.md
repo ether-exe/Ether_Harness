@@ -1,16 +1,17 @@
 # Ether Harness — Specification
 
-Status: **0.2.0**, tested with pi **1.4.0**. Fullscreen only.
+Status: **0.2.1**, tested with pi **1.4.0**. Fullscreen only.
 
 ## 1. Purpose
 
-Ether is the terminal chrome for pi: an animated 7-row header, a far-left taskbar, a Files rail, a file preview, and an isolated side chat. This folder is the source of truth. `~/.pi/agent` (or `$PI_CODING_AGENT_DIR`) is an install target.
+Ether is the terminal chrome for pi: an animated 7-row header, a far-left taskbar, a Files rail, a file preview, an isolated side chat, and a GitHub HUD fed by the connected `gh` CLI. This folder is the source of truth. `~/.pi/agent` (or `$PI_CODING_AGENT_DIR`) is an install target.
 
 Non-goals:
 
 - regular (scrollback) mode
 - editing or mutating files from the side chat
 - sharing context with the main transcript
+- writing to GitHub or running mutating `gh` commands
 - a terminal emulator or `node-pty`
 - memory/brain/self-modifying systems
 
@@ -43,10 +44,13 @@ HStack
 ├─ VStack
 │  ├─ header 7 rows
 │  └─ app root (transcript + dock)
-└─ RightsidebarA  40 cols (36 while preview open), full height, chat
+├─ RightsidebarA  40 cols (36 while preview open), full height, chat
+└─ RightSidebarC  38 cols, full height, GitHub HUD (independent toggle)
 ```
 
-The preview takes the left slot; Files hides while it is open. Only one left rail is visible.
+The preview takes the left slot; Files hides while it is open. Only one left rail is visible. The
+two right rails are independent: chat and GitHub can be open together, and each taskbar icon
+toggles its own rail.
 
 Constants:
 
@@ -62,6 +66,8 @@ Constants:
 | `CHAT_MIN_TERMINAL` | 85 |
 | `PREVIEW_SIDEBAR_WIDTH` | 47 |
 | `PREVIEW_MIN_TERMINAL` | 132 |
+| `GITHUB_SIDEBAR_WIDTH` | 38 |
+| `GITHUB_MIN_TERMINAL` | 92 |
 
 Width math:
 
@@ -69,6 +75,8 @@ Width math:
 - Preview closed: Files + chat `5 + 24 + 40 = 69` → 140 leaves 71.
 - Chat only: `5 + 40 = 45` → 95.
 - Nothing: `5` → 135.
+- Both right rails: chat 40 + GitHub 38 → `5 + 24 + 40 + 38 = 107` → 140 leaves 33. The rails
+  never auto-collapse each other; the user reclaims space with `✦` or `⑂`.
 
 The footer is not part of the wrapper. `ctx.ui.setFooter` replaces the built-in footer inside the app root's dock.
 
@@ -97,10 +105,10 @@ Border and caps use a darker derivative of `borderMuted`. Left cap is `├` when
 
 ## 6. LeftSidebarA — taskbar
 
-Top icons (rows 1,3,5,7,9,11,13,15,17): `⌂ ▤ ⌕ ⌁ ⎇ ◫ ⬡ ◷ ✦`.
+Top icons (rows 1,3,5,7,9,11,13,15,17,19): `⌂ ▤ ⌕ ⌁ ⎇ ◫ ⬡ ◷ ✦ ⑂`.
 Bottom icons: `⟳ ≡ ?`.
 
-`◫` toggles `sidebarsCollapsed` for Files/preview and chat; `✦` (AI) toggles `chatCollapsed` for the side chat alone. The taskbar always remains. Other icons are intentionally inert; `enter` on them reports `"<label> is not wired yet"`.
+`◫` toggles `sidebarsCollapsed` for Files/preview, chat, and GitHub; `✦` (AI) toggles `chatCollapsed` for the side chat alone; `⑂` (GitHub) toggles `githubCollapsed` for the GitHub rail alone. The two right rails are independent, so both can be open. The taskbar always remains. Other icons are intentionally inert; `enter` on them reports `"<label> is not wired yet"`.
 
 Keyboard: `↑↓`/`j k`, `home`/`end`, `enter`, `tab`/`shift+tab`; focused selection uses `selectedBg` and an `accent` glyph. Mouse clicks use the same action and sync the selection without taking focus.
 
@@ -170,7 +178,58 @@ Persistence: one Markdown log per day in `~/Ether/chat_rightsidebarA/` (`ETHER_C
 
 Keyboard: typing/Enter unchanged; `pgup`/`pgdn`, `ctrl+home`/`ctrl+end`, `ctrl+↑`/`ctrl+↓` select, `ctrl+x` copy, `ctrl+r` quote; `esc` clears selection first, then leaves.
 
-## 10. Focus model
+## 10. RightSidebarC — GitHub
+
+Read-only GitHub HUD in the rightmost slot, backed by the connected `gh` CLI (tested with `gh`
+2.102.0). Opens with the `⑂` taskbar icon or `alt+5`; each icon toggles only its own rail, so chat
+and GitHub can be open at once.
+
+Data is fetched lazily when the rail becomes visible and cached for 5 minutes:
+
+| Block | Source | Cap |
+|---|---|---|
+| `OPERATOR` | `gh api user` | card with bold, letter-spaced name; `@login`; public repo count; followers; bio (3 lines) |
+| `REPOS` | `gh repo list --limit 20 --json …` | up to 20 repos; 10 shown by default, `⊞`/`⊟` expands the rest |
+| `CONTRIBUTIONS` | `gh api graphql` → `contributionsCollection` (12 mo) | 12-month total, month total, streak, 7×6 heatmap, exact active days |
+| `ACTIVITY` | `gh api repos/<owner>/<repo>/commits?per_page=1` | latest commit for up to 12 repos; 10 shown by default, `⊞`/`⊟` expands |
+| `FEED` | `https://github.com/trending` (scraped; `ETHER_TRENDING_JSON` overrides) | 5 repos: name, total stars, 2-line README excerpt, stars today, language; `⊞`/`⊟` expands the full README |
+
+Contributions use `viewer.contributionsCollection` over the last 12 months; GraphQL caps a range at
+one year, so the total is labelled `12 MO`. The heatmap is 7 day columns × up to 6 week rows with a
+`· ▁ ▃ ▅ █` intensity legend, and `ACTIVE` lists the current month's positive days with exact
+counts. Streaks are computed from the same 365-day payload.
+
+Calls use `execFile` with a 12 s timeout, no shell, `windowsHide`, and a 4 MB buffer. Every command
+is read-only: no token is read, printed, or stored.
+
+States:
+
+- **syncing** — spinner in the header and footer; old data stays visible during a refresh.
+- **no GitHub CLI** — centered `No GitHub CLI connected` plus a cause-specific hint: `gh` missing
+  from PATH, `gh auth login`, or the raw API error. `r` retries.
+- **partial** — if the repo list fails but the profile succeeds, identity still renders with a
+  `repo list unavailable` note; a failed contribution query shows `contributions unavailable`
+  inside the section without hiding the rest of the rail.
+- **stale** — `LINK <age>` in the header. The ticker retries 20 s after a failure and keeps a
+  successful snapshot for 5 min.
+
+Keyboard when focused: `↑↓`/`j k` scroll, `pgup`/`pgdn`, `home`/`end`, `r` refresh, `tab` cycle,
+`esc` leave. Mouse wheel scrolls. REPOS and ACTIVITY show ten rows by default; when there are more,
+a `⊞ N MORE` row ends the section, and clicking it expands the rest with a `⊟ LESS` row. Click the
+`⊞`/`⊟` icon at the right edge of a FEED row to expand or collapse its README; the icon is the only
+click target there. The empty/error state is centered both ways.
+
+The FEED scrapes the public trending page because GitHub has no trending API; a markup change shows
+`trending unavailable` instead of failing the rail. READMEs are prefetched in the background after a
+sync through `gh api repos/<owner>/<repo>/readme` (raw accept), stripped to text, and cached for the
+session. Collapsed rows show the first two non-empty lines; expanding shows up to 8,000 chars / 80
+lines.
+
+Colors use theme tokens only (`accent`, `toolTitle`, `muted`, `dim`, `text`, `success`,
+`borderMuted`, `toolPendingBg`), so Ether and Bluether both apply. `ETHER_GH_BIN` overrides the
+binary for tests and sandboxes; the harness points it at `tests/fixtures/fake-gh.mjs`.
+
+## 11. Focus model
 
 Global shortcuts use `pi.registerShortcut` and only fire while the main editor is focused:
 
@@ -180,13 +239,14 @@ Global shortcuts use `pi.registerShortcut` and only fire while the main editor i
 | `alt+2` | Files |
 | `alt+3` | preview (needs active file) |
 | `alt+4` | chat |
+| `alt+5` | GitHub rail |
 | `alt+l` | toggle side rails |
 
-A shared `RailNav` captures the editor on first entry. Inside any rail, `tab`/`shift+tab` cycles visible rails and `esc` returns to the editor. If a focused rail disappears through resize or `◫`, focus is released on the next 150 ms tick. Non-taskbar shortcuts expand collapsed rails before focusing. Unavailable rails report why (85/110/132-col cutoffs, no active file, Files hidden behind preview).
+A shared `RailNav` captures the editor on first entry. Inside any rail, `tab`/`shift+tab` cycles visible rails and `esc` returns to the editor. If a focused rail disappears through resize or `◫`, focus is released on the next 150 ms tick. Non-taskbar shortcuts expand collapsed rails before focusing. Unavailable rails report why (85/92/110/132-col cutoffs, no active file, Files hidden behind preview).
 
 Mouse behavior is unchanged; clicks do not take focus except the chat composer.
 
-## 11. Themes
+## 12. Themes
 
 Both are 56-token dark themes.
 
@@ -196,13 +256,13 @@ Bluether: navy panels (`#050b18`), royal structure (`#5b8cff`), ice text (`#dbe7
 
 Theme files are installed to `<agent-dir>/themes/`. Selection lives in `settings.json` → `theme`.
 
-## 12. Animation and wordmark
+## 13. Animation and wordmark
 
 One 150 ms ticker re-renders while a TUI exists. Busy: braille spinner to the left of the wordmark. Idle: breathing `●` between `borderMuted` and `success`. Uptime updates live.
 
 Wordmark pipeline: Isometra Regular 400 → PowerShell `System.Drawing` at 96 px → faux-bold 9 stamps `(0,2,4)×(0,1,2)` → crop/threshold 0.22 → sample 76×12 → pack into braille 2×4 cells → embed as `ETHER_ART`. The font is source only; runtime uses the embedded strings.
 
-## 13. Verification
+## 14. Verification
 
 `tests/env.mjs` resolves the installed pi package (`PI_ROOT` or `npm root -g`) and loads pi's bundled jiti, pi-tui, and theme loader. It points `ETHER_CHAT_CONFIG` at a temp file.
 
@@ -217,12 +277,15 @@ Wordmark pipeline: Isometra Regular 400 → PowerShell `System.Drawing` at 96 px
 | `left-preview` | left slot geometry, 36-col chat, 131↔132 cutoff, close |
 | `prose-preview` | dim prose, no blue bleed, Dracula truecolor and 256-color |
 | `keyboard` | shortcuts, focus cycle, taskbar/Files/preview/chat keys, notices |
+| `github-rail` | click/alt+5 toggles, gh sync, identity/repos/activity, auth and missing-binary states, both-rail layout |
 
 These prove layout math, ANSI colors, focus, and key routing. They do not judge aesthetics or real terminal key delivery.
 
-## 14. Portability
+## 15. Portability
 
 - All filesystem code uses `node:path` and `node:fs`; no Windows-only APIs.
+- `gh` calls use `execFile` with an argv array, so spaces and non-ASCII paths are safe; `gh.exe`
+  resolves on Windows and the brew binary on macOS. `ETHER_GH_BIN` overrides the command.
 - Tests resolve `PI_ROOT`; they must not hardcode a machine path.
 - Side-chat config honors `ETHER_CHAT_CONFIG` and `PI_CODING_AGENT_DIR`.
 - Dracula output honors theme color mode (truecolor / 256-color).
@@ -231,10 +294,13 @@ These prove layout math, ANSI colors, focus, and key routing. They do not judge 
 - Braille/box-drawing glyph coverage is font-dependent.
 - `setLayoutRoot` is pi-internal; a future pi release may break the chrome.
 
-## 15. Known limits
+## 16. Known limits
 
 - fullscreen only; mode switch loses chrome until restart
 - side-chat history is text-only; tool calls are not persisted
+- the GitHub rail needs `gh` 2.x on PATH and an authenticated account; it caches for 5 minutes and
+  shows at most 20 repos / 12 latest commits (ten of each by default)
+- the FEED depends on github.com/trending markup; READMEs are cached in memory for the session only
 - unread state and drafts are in-memory
 - `/chat-history` rail view deferred
 - fixed 38-col wordmark forces metric eviction at 120 cols

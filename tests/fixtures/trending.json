@@ -1,0 +1,16 @@
+[
+	{
+		"name": "octo-test/trend-one",
+		"stars": 12345,
+		"description": "A trending demo repository",
+		"language": "TypeScript",
+		"starsToday": 321
+	},
+	{
+		"name": "octo-test/trend-two",
+		"stars": 6789,
+		"description": "Another trending repository",
+		"language": "Rust",
+		"starsToday": 54
+	}
+]

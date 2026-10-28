@@ -116,12 +116,12 @@ try {
 	for (const width of [140, 60]) {
 		const frame = renderLayoutFrame(tui.layoutRoot, width, 40);
 		const plain = frame.lines.map((line) => stripTerminalSequences(line));
-		const topIcons = ["⌂", "▤", "⌕", "⌁", "⎇", "◫", "⬡", "◷", "✦"];
+		const topIcons = ["⌂", "▤", "⌕", "⌁", "⎇", "◫", "⬡", "◷", "✦", "⑂"];
 		const footerIcons = ["⟳", "≡", "?"];
 		const topOk = topIcons.every((icon, index) => plain[1 + index * 2]?.[1] === icon);
 		const footerOk = footerIcons.every((icon, index) => plain[34 + index * 2]?.[1] === icon);
 		const gapOk = [16, 18, 33].every((row) => plain[row]?.[1] === " ");
-		const secondColumnEmpty = [1, 3, 5, 7, 9, 11, 13, 15, 17, 34, 36, 38].every((row) => plain[row]?.[3] === " ");
+		const secondColumnEmpty = [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 34, 36, 38].every((row) => plain[row]?.[3] === " ");
 		check(
 			topOk && footerOk && gapOk && secondColumnEmpty,
 			`taskbar ${width}: top=${topOk} footer=${footerOk} gap=${gapOk} secondColumnEmpty=${secondColumnEmpty}`,
@@ -284,6 +284,14 @@ try {
 	const searchPress = taskbar.handleMouse?.({ ...clickEvent(5), type: "press" });
 	const searchResult = taskbar.handleMouse?.(clickEvent(5));
 	check(searchPress === undefined && searchResult === undefined, "taskbar search row: inert");
+	const entriesBeforeGithub = tui.layoutRoot.entries?.length ?? 0;
+	const githubPress = taskbar.handleMouse?.({ ...clickEvent(19), type: "press" });
+	const githubResult = taskbar.handleMouse?.(clickEvent(19));
+	check(githubPress?.handled === true && githubResult?.handled === true, "taskbar GitHub row handles clicks");
+	check((tui.layoutRoot.entries?.length ?? 0) === entriesBeforeGithub + 1, "GitHub icon opens its rail");
+	taskbar.handleMouse?.({ ...clickEvent(19), type: "press" });
+	taskbar.handleMouse?.(clickEvent(19));
+	check((tui.layoutRoot.entries?.length ?? 0) === entriesBeforeGithub, "GitHub icon collapses its rail");
 	const aiExpandedEntries = tui.layoutRoot.entries?.length ?? 0;
 	const aiPress = taskbar.handleMouse?.({ ...clickEvent(17), type: "press" });
 	const aiResult = taskbar.handleMouse?.(clickEvent(17));
