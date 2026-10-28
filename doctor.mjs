@@ -7,7 +7,7 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { ROOT, findPiRoot, readPiVersion, resolveAgentDir } from "./lib/pi-paths.mjs";
+import { ROOT, findPiRoot, readPiVersion, resolveAgentDir, resolvePiDependency } from "./lib/pi-paths.mjs";
 
 const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
 const TESTED_PI = "1.4.0";
@@ -68,12 +68,12 @@ if (!piRoot) {
 	if (version !== TESTED_PI && version !== "unknown") {
 		warn(`chrome is tested with pi ${TESTED_PI}; found ${version}`);
 	}
-	const tui = join(piRoot, "node_modules", "@earendil-works", "pi-tui", "dist", "index.js");
-	if (existsSync(tui)) ok("pi-tui is present");
-	else fail(`missing pi-tui at ${tui}`);
-	const jiti = join(piRoot, "node_modules", "jiti", "lib", "jiti.mjs");
-	if (existsSync(jiti)) ok("jiti is present");
-	else fail(`missing jiti at ${jiti}`);
+	const tui = resolvePiDependency("@earendil-works/pi-tui/dist/index.js", piRoot);
+	if (tui) ok(`pi-tui is present (${tui})`);
+	else fail("missing pi-tui; expected it in pi's node_modules");
+	const jiti = resolvePiDependency("jiti/lib/jiti.mjs", piRoot);
+	if (jiti) ok(`jiti is present (${jiti})`);
+	else fail("missing jiti; expected it in pi's node_modules");
 }
 
 // Harness files

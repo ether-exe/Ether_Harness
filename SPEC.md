@@ -1,6 +1,6 @@
 # Ether Harness — Specification
 
-Status: **0.1.0**, tested with pi **1.4.0**. Fullscreen only.
+Status: **0.2.0**, tested with pi **1.4.0**. Fullscreen only.
 
 ## 1. Purpose
 
@@ -97,10 +97,10 @@ Border and caps use a darker derivative of `borderMuted`. Left cap is `├` when
 
 ## 6. LeftSidebarA — taskbar
 
-Top icons (rows 1,3,5,7,9,11,13,15): `⌂ ▤ ⌕ ⌁ ⎇ ◫ ⬡ ◷`.
+Top icons (rows 1,3,5,7,9,11,13,15,17): `⌂ ▤ ⌕ ⌁ ⎇ ◫ ⬡ ◷ ✦`.
 Bottom icons: `⟳ ≡ ?`.
 
-Only `◫` has an action: toggles `sidebarsCollapsed` for Files/preview and chat; the taskbar always remains. Other icons are intentionally inert; `enter` on them reports `"<label> is not wired yet"`.
+`◫` toggles `sidebarsCollapsed` for Files/preview and chat; `✦` (AI) toggles `chatCollapsed` for the side chat alone. The taskbar always remains. Other icons are intentionally inert; `enter` on them reports `"<label> is not wired yet"`.
 
 Keyboard: `↑↓`/`j k`, `home`/`end`, `enter`, `tab`/`shift+tab`; focused selection uses `selectedBg` and an `accent` glyph. Mouse clicks use the same action and sync the selection without taking focus.
 
@@ -109,10 +109,13 @@ Keyboard: `↑↓`/`j k`, `home`/`end`, `enter`, `tab`/`shift+tab`; focused sele
 Row 0 is the `Files` heading. Tree starts at row 1 from the session cwd.
 
 - folders first, then files, alphabetically
+- folders render in the harness blue (`toolTitle`); files stay `dim`/`text`
 - `▾` expanded / `▸` collapsed; all start expanded
 - indent 2 per level, capped at 6
 - refresh every 10 s and on cwd change
-- skips `.git`, `node_modules`, `.cache`, `.next`, `.turbo`, `dist`, `build`, `out`, `target`, `__pycache__`, `.venv`, `venv`
+- skips VCS metadata and generated dirs: `.git`, `.hg`, `.svn`, `node_modules`, `.cache`, `.next`, `.turbo`, `dist`, `build`, `out`, `target`, `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.venv`, `venv`, `__MACOSX`, `$RECYCLE.BIN`, `System Volume Information`
+- skips OS/editor noise files: `.DS_Store`, `.localized`, `Thumbs.db`, `ehthumbs.db`, `desktop.ini`, `._*`, `.#*`, `#*#`, `*~`, `*.swp`, `*.swo`, `*.swx`, `*.pyc`, `*.log`, `*.tmp`
+- symlinks are skipped, so the tree never leaves the workspace
 - cap depth 8 / 500 nodes
 
 Mouse: click folder to toggle, click file to open the preview, wheel scrolls.

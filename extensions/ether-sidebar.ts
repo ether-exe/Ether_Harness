@@ -98,7 +98,7 @@ interface RailNav {
 }
 
 /** Prototype first column in LeftSidebarA; the second column is intentionally empty. */
-type TaskbarAction = "layout";
+type TaskbarAction = "layout" | "chat";
 
 interface TaskbarIcon {
 	readonly icon: string;
@@ -115,15 +115,17 @@ const TASKBAR_TOP_ICONS: readonly TaskbarIcon[] = [
 	{ icon: "◫", label: "Layout", action: "layout" },
 	{ icon: "⬡", label: "Extensions" },
 	{ icon: "◷", label: "History" },
+	{ icon: "✦", label: "AI", action: "chat" },
 ];
 const TASKBAR_FOOTER_ICONS: readonly TaskbarIcon[] = [
 	{ icon: "⟳", label: "Reload" },
 	{ icon: "≡", label: "Menu" },
 	{ icon: "?", label: "Help" },
 ];
-/** Heavy/generated directories skipped so an all-expanded tree stays responsive. */
-const FILE_TREE_SKIP = new Set([
-	".git",
+/** VCS metadata is skipped whether it is a directory or a worktree pointer file. */
+const FILE_TREE_SKIP_VCS = new Set([".git", ".hg", ".svn"]);
+/** Heavy/generated directories skipped so the tree stays useful. */
+const FILE_TREE_SKIP_DIRS = new Set([
 	"node_modules",
 	".cache",
 	".next",
@@ -133,9 +135,39 @@ const FILE_TREE_SKIP = new Set([
 	"out",
 	"target",
 	"__pycache__",
+	".pytest_cache",
+	".mypy_cache",
+	".ruff_cache",
 	".venv",
 	"venv",
+	"__MACOSX",
+	"$RECYCLE.BIN",
+	"System Volume Information",
 ]);
+/** OS/editor files that are generated noise rather than workspace content. */
+const FILE_TREE_SKIP_FILES = new Set([
+	".DS_Store",
+	".localized",
+	"Thumbs.db",
+	"ehthumbs.db",
+	"desktop.ini",
+]);
+const FILE_TREE_SKIP_FILE_PATTERNS: readonly RegExp[] = [
+	/^\._/, // AppleDouble resource forks
+	/^\.#/, // Emacs lock files
+	/^#.*#$/, // Emacs autosave files
+	/~$/, // editor backups
+	/\.(swp|swo|swx|pyc|log|tmp)$/i,
+];
+
+/** One filter used by the Files rail and the side-chat read-only tools. */
+function isTreeNoise(name: string, isDir: boolean): boolean {
+	if (FILE_TREE_SKIP_VCS.has(name)) return true;
+	if (isDir && FILE_TREE_SKIP_DIRS.has(name)) return true;
+	if (isDir) return false;
+	if (FILE_TREE_SKIP_FILES.has(name)) return true;
+	return FILE_TREE_SKIP_FILE_PATTERNS.some((pattern) => pattern.test(name));
+}
 const FILE_TREE_MAX_DEPTH = 8;
 const FILE_TREE_INDENT_STEP = 2;
 const FILE_TREE_MAX_INDENT = 6;
@@ -259,7 +291,7 @@ function workspacePath(root: string, target: string): { abs: string } | { error:
 function sortedEntries(dir: string) {
 	try {
 		return readdirSync(dir, { withFileTypes: true })
-			.filter((entry) => !FILE_TREE_SKIP.has(entry.name))
+			.filter((entry) => !isTreeNoise(entry.name, entry.isDirectory()))
 			.sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
 	} catch {
 		return [];
@@ -412,7 +444,7 @@ function readFileTree(dir: string, depth = 0, budget = { remaining: FILE_TREE_MA
 		if (budget.remaining <= 0) break;
 		if (entry.isSymbolicLink()) continue;
 		const isDir = entry.isDirectory();
-		if (isDir && FILE_TREE_SKIP.has(entry.name)) continue;
+		if (isTreeNoise(entry.name, isDir)) continue;
 		const node: FileNode = { name: entry.name, path: join(dir, entry.name), isDir };
 		budget.remaining -= 1;
 		if (isDir) node.children = readFileTree(node.path, depth + 1, budget);
@@ -2054,9 +2086,8 @@ class EtherFilesSidebar implements Component {
 				const indent = " ".repeat(Math.min(item.depth * FILE_TREE_INDENT_STEP, FILE_TREE_MAX_INDENT));
 				if (item.node.isDir) {
 					const marker = this.collapsed.has(item.node.path) ? "▸ " : "▾ ";
-					const tint = selected ? "text" : "dim";
-					const name = selected ? "accent" : "muted";
-					content = ` ${indent}${theme.fg(tint, marker)}${theme.fg(name, item.node.name)}`;
+					// Harness blue: the same toolTitle hue as tool output and the active-file dot.
+					content = ` ${indent}${theme.fg("toolTitle", marker)}${theme.fg("toolTitle", item.node.name)}`;
 				} else {
 					const active = this.getActiveFile() === item.node.path;
 					const marker = active ? `${theme.fg("toolTitle", "●")} ` : "  ";
@@ -2629,6 +2660,7 @@ interface LiveChrome {
 	theme?: ThemeLike;
 	ticker?: ReturnType<typeof setInterval>;
 	sidebarsCollapsed?: boolean;
+	chatCollapsed?: boolean;
 	activeFile?: string | null;
 	chatModel?: ChatModelRef | null;
 	chatSidebar?: { syncVisibility(): void };
@@ -2718,7 +2750,7 @@ function installChrome(live: LiveChrome): void {
 		const width = tui.terminal?.columns ?? 0;
 		if (rail === taskbarSidebar) return true;
 		if (live.sidebarsCollapsed) return false;
-		if (rail === chatSidebar) return width >= CHAT_MIN_TERMINAL;
+		if (rail === chatSidebar) return !live.chatCollapsed && width >= CHAT_MIN_TERMINAL;
 		if (rail === previewSidebar) return !!live.activeFile && width >= PREVIEW_MIN_TERMINAL;
 		if (rail === filesSidebar) {
 			const previewVisible = !!live.activeFile && width >= PREVIEW_MIN_TERMINAL;
@@ -2805,8 +2837,30 @@ function installChrome(live: LiveChrome): void {
 	};
 	live.toggleLayout = toggleLayout;
 
-	const handleTaskbarAction = (_action: TaskbarAction): void => {
-		toggleLayout();
+	/** Toggle only the side chat, based on whether it is actually visible right now. */
+	const toggleChat = (): void => {
+		const focused = focusedComponent();
+		const width = tui.terminal?.columns ?? 0;
+		const chatVisible = !live.sidebarsCollapsed && !live.chatCollapsed && width >= CHAT_MIN_TERMINAL;
+		if (chatVisible) {
+			live.chatCollapsed = true;
+		} else {
+			if (width < CHAT_MIN_TERMINAL) {
+				notify(`chat needs at least ${CHAT_MIN_TERMINAL} columns`);
+				return;
+			}
+			live.chatCollapsed = false;
+			// AI brings the chat back even when all rails were hidden with ◫.
+			live.sidebarsCollapsed = false;
+		}
+		if (baseRoot) t.setLayoutRoot(baseRoot);
+		if (focused && isRail(focused) && !railVisible(focused)) nav.leave();
+		tui.requestRender();
+	};
+
+	const handleTaskbarAction = (action: TaskbarAction): void => {
+		if (action === "chat") toggleChat();
+		else toggleLayout();
 	};
 	const handleInertIcon = (item: TaskbarIcon): void => {
 		notify(`${item.label} is not wired yet`);
@@ -2834,10 +2888,16 @@ function installChrome(live: LiveChrome): void {
 			notify(`preview needs at least ${PREVIEW_MIN_TERMINAL} columns`);
 			return;
 		}
+		let changed = false;
+		if (kind === "chat" && live.chatCollapsed) {
+			live.chatCollapsed = false;
+			changed = true;
+		}
 		if (kind !== "taskbar" && live.sidebarsCollapsed) {
 			live.sidebarsCollapsed = false;
-			if (baseRoot) t.setLayoutRoot(baseRoot);
+			changed = true;
 		}
+		if (changed && baseRoot) t.setLayoutRoot(baseRoot);
 		const target =
 			kind === "taskbar"
 				? taskbarSidebar
@@ -2861,7 +2921,7 @@ function installChrome(live: LiveChrome): void {
 		getTheme,
 		() => live.ctx,
 		() => live.chatModel ?? null,
-		() => !live.sidebarsCollapsed && (tui.terminal?.columns ?? 0) >= CHAT_MIN_TERMINAL,
+		() => !live.sidebarsCollapsed && !live.chatCollapsed && (tui.terminal?.columns ?? 0) >= CHAT_MIN_TERMINAL,
 		nav,
 	);
 	live.chatSidebar = chatSidebar;
@@ -2908,7 +2968,8 @@ function installChrome(live: LiveChrome): void {
 			grow: 0,
 			shrink: 0,
 			minSize: 0,
-			visible: (viewport: { width: number }) => viewport.width >= CHAT_MIN_TERMINAL,
+			visible: (viewport: { width: number }) =>
+				!live.chatCollapsed && viewport.width >= CHAT_MIN_TERMINAL,
 		};
 		const previewRail = {
 			// RightsidebarB: file preview, now in the left slot where Files lives.
@@ -2919,8 +2980,9 @@ function installChrome(live: LiveChrome): void {
 			minSize: 0,
 			visible: (viewport: { width: number }) => !!live.activeFile && viewport.width >= PREVIEW_MIN_TERMINAL,
 		};
-		// Side rails toggle with ◫; LeftSidebarA always survives.
+		// Side rails toggle with ◫; LeftSidebarA always survives. The AI icon toggles chat alone.
 		const showRails = !live.sidebarsCollapsed;
+		const showChat = showRails && !live.chatCollapsed;
 		return new HStack([
 			{
 				// LeftSidebarA: far-left taskbar, always visible even when the other rails hide.
@@ -2934,7 +2996,7 @@ function installChrome(live: LiveChrome): void {
 			...(showRails && live.activeFile ? [previewRail] : []),
 			...(showRails ? [filesRail] : []),
 			{ component: chatColumn, basis: 0, grow: 1, shrink: 1, minSize: 1 },
-			...(showRails ? [chatRail] : []),
+			...(showChat ? [chatRail] : []),
 		]);
 	};
 
@@ -3267,7 +3329,7 @@ export default function etherChrome(pi: ExtensionAPI): void {
 					const previewVisible = !!live.activeFile && width >= PREVIEW_MIN_TERMINAL;
 					return {
 						left: shown && (previewVisible || width >= FILES_MIN_TERMINAL),
-						right: shown && width >= CHAT_MIN_TERMINAL,
+						right: shown && !live.chatCollapsed && width >= CHAT_MIN_TERMINAL,
 					};
 				},
 				footerData,

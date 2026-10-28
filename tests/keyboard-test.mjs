@@ -145,6 +145,12 @@ try {
 	check(taskbar.selectedIcon === "⌂", "home selects the first taskbar icon");
 	taskbar.handleInput("\x1b[F");
 	check(taskbar.selectedIcon === "?", "end selects the last taskbar icon");
+	const aiExpandedEntries = tui.layoutRoot.entries.length;
+	taskbar.selectedIcon = "✦";
+	taskbar.handleInput("\r");
+	check(tui.layoutRoot.entries.length === aiExpandedEntries - 1, "enter on the AI icon collapses the side chat");
+	taskbar.handleInput("\r");
+	check(tui.layoutRoot.entries.length === aiExpandedEntries, "enter on the AI icon restores the side chat");
 	taskbar.selectedIcon = "◫";
 	const layoutBefore = tui.layoutRoot.entries.length;
 	taskbar.handleInput("\r");

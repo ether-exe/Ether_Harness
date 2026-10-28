@@ -2,6 +2,29 @@
 
 All notable changes to the Ether Harness.
 
+## 0.2.0 — 2026-10-27
+
+Installed and refined on macOS with pi 1.4.0.
+
+### Added
+
+- Taskbar `✦` AI icon (row 17), wired to toggle only the side chat. Keyboard `enter` uses the same action; `◫` still toggles all side rails. Below 85 columns the AI icon reports the chat-width requirement.
+- Files rail folder rows now use the harness blue (`toolTitle`): `#3a7bcb` in Ether, `#5b8cff` in Bluether.
+- File-tree filtering for generated noise: VCS metadata (`.git`, `.hg`, `.svn`), heavy build/cache directories, OS metadata files, editor backups/swaps, `*.pyc`, `*.log`, `*.tmp`, and symlinks. The tree stays rooted at the session workspace.
+
+### Changed
+
+- `lib/pi-paths.mjs`, `doctor.mjs`, and `tests/env.mjs` now resolve pi's dependencies through Node's own resolver, supporting both nested and hoisted (managed-installer) layouts.
+- Test rendering is pinned to truecolor, so assertions no longer depend on the host terminal's color mode; the 256-color path is still tested explicitly.
+- Side-chat `list_dir`/`grep_workspace` share the same generated-file filter as the Files rail.
+
+### Verification
+
+- `npm test` — 7/7 harnesses pass.
+- `npm run doctor` — 0 errors, 0 warnings.
+- Installed files match the source tree; theme `Ether` is active.
+- Added coverage for AI chat toggling, folder color, generated-file exclusion, symlink containment, and both dependency layouts.
+
 ## 0.1.0 — 2026-10-22
 
 Initial portable harness.

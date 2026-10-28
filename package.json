@@ -1,6 +1,6 @@
 {
 	"name": "ether-harness",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"private": true,
 	"type": "module",
 	"description": "Ether terminal chrome for pi: animated header, taskbar, Files, file preview, and side chat",

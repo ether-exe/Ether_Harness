@@ -3,3 +3,9 @@ node_modules/
 Thumbs.db
 *.log
 .ether-harness-backups/
+
+# Project memories live in the private Memories.md repo, never in source.
+Ether/
+Ether_Harness_Memory.md
+Tinctorius.md
+sessions/

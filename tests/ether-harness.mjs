@@ -116,12 +116,12 @@ try {
 	for (const width of [140, 60]) {
 		const frame = renderLayoutFrame(tui.layoutRoot, width, 40);
 		const plain = frame.lines.map((line) => stripTerminalSequences(line));
-		const topIcons = ["⌂", "▤", "⌕", "⌁", "⎇", "◫", "⬡", "◷"];
+		const topIcons = ["⌂", "▤", "⌕", "⌁", "⎇", "◫", "⬡", "◷", "✦"];
 		const footerIcons = ["⟳", "≡", "?"];
 		const topOk = topIcons.every((icon, index) => plain[1 + index * 2]?.[1] === icon);
 		const footerOk = footerIcons.every((icon, index) => plain[34 + index * 2]?.[1] === icon);
-		const gapOk = [16, 20, 33].every((row) => plain[row]?.[1] === " ");
-		const secondColumnEmpty = [1, 3, 5, 7, 9, 11, 13, 15, 34, 36, 38].every((row) => plain[row]?.[3] === " ");
+		const gapOk = [16, 18, 33].every((row) => plain[row]?.[1] === " ");
+		const secondColumnEmpty = [1, 3, 5, 7, 9, 11, 13, 15, 17, 34, 36, 38].every((row) => plain[row]?.[3] === " ");
 		check(
 			topOk && footerOk && gapOk && secondColumnEmpty,
 			`taskbar ${width}: top=${topOk} footer=${footerOk} gap=${gapOk} secondColumnEmpty=${secondColumnEmpty}`,
@@ -166,6 +166,24 @@ try {
 	fs.writeFileSync(path.join(treeRoot, "src", "nested", "deep", "deeper", "deep.ts"), "");
 	fs.writeFileSync(path.join(treeRoot, "src", "nested", "b.ts"), "");
 	fs.writeFileSync(path.join(treeRoot, "README.md"), "");
+	// Generated system/editor noise must never enter the tree.
+	fs.writeFileSync(path.join(treeRoot, ".DS_Store"), "");
+	fs.writeFileSync(path.join(treeRoot, "._README.md"), "");
+	fs.writeFileSync(path.join(treeRoot, "debug.log"), "");
+	fs.writeFileSync(path.join(treeRoot, "notes.md~"), "");
+	fs.mkdirSync(path.join(treeRoot, ".pytest_cache"));
+	fs.writeFileSync(path.join(treeRoot, ".pytest_cache", "state"), "");
+	fs.mkdirSync(path.join(treeRoot, "node_modules"));
+	fs.writeFileSync(path.join(treeRoot, "node_modules", "dep.js"), "");
+	fs.mkdirSync(path.join(treeRoot, ".git"));
+	fs.writeFileSync(path.join(treeRoot, ".git", "config"), "");
+	const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ether-outside-"));
+	fs.writeFileSync(path.join(outsideRoot, "secret.ts"), "");
+	try {
+		fs.symlinkSync(outsideRoot, path.join(treeRoot, "outside-link"), "dir");
+	} catch {
+		// symlinks may be unavailable on some platforms; the filter still stands
+	}
 	ctx1.cwd = treeRoot;
 	const bFrame = renderLayoutFrame(tui.layoutRoot, 140, 40);
 	const bRows = bFrame.lines.map((line) => stripTerminalSequences(line).slice(5, 29));
@@ -183,6 +201,23 @@ try {
 			treeText.includes("README.md") &&
 			deepRow?.indexOf("deep.ts") === 9,
 		"file tree: heading, expanded recursion, and clamped deep indent",
+	);
+	check(
+		!treeText.includes(".DS_Store") &&
+			!treeText.includes("._README.md") &&
+			!treeText.includes("debug.log") &&
+			!treeText.includes("notes.md~") &&
+			!treeText.includes(".pytest_cache") &&
+			!treeText.includes("node_modules") &&
+			!treeText.includes(".git") &&
+			!treeText.includes("outside-link") &&
+			!treeText.includes("secret.ts"),
+		"file tree: generated files and links outside the workspace are excluded",
+	);
+	const folderLine = bFrame.lines.find((line) => stripTerminalSequences(line).slice(5, 29).includes("src"));
+	check(
+		!!folderLine && folderLine.includes(theme.getFgAnsi("toolTitle")),
+		"file tree: folders use the harness blue",
 	);
 	const filesClick = (y) => ({
 		type: "click",
@@ -228,6 +263,7 @@ try {
 	);
 	ctx1.cwd = originalCwd;
 	fs.rmSync(treeRoot, { recursive: true, force: true });
+	fs.rmSync(outsideRoot, { recursive: true, force: true });
 
 	// Mouse action: only the layout icon is wired; other rows are inert.
 	const clickEvent = (y) => ({
@@ -248,6 +284,24 @@ try {
 	const searchPress = taskbar.handleMouse?.({ ...clickEvent(5), type: "press" });
 	const searchResult = taskbar.handleMouse?.(clickEvent(5));
 	check(searchPress === undefined && searchResult === undefined, "taskbar search row: inert");
+	const aiExpandedEntries = tui.layoutRoot.entries?.length ?? 0;
+	const aiPress = taskbar.handleMouse?.({ ...clickEvent(17), type: "press" });
+	const aiResult = taskbar.handleMouse?.(clickEvent(17));
+	const aiCollapsedPlain = renderLayoutFrame(tui.layoutRoot, 140, 40).lines.map((line) => stripTerminalSequences(line));
+	check(aiPress?.handled === true && aiResult?.handled === true, "taskbar AI row handles clicks");
+	check(
+		(tui.layoutRoot.entries?.length ?? 0) === aiExpandedEntries - 1 &&
+			!aiCollapsedPlain.some((line) => line.includes("● ETHER")) &&
+			aiCollapsedPlain.some((line) => line.includes("Files")),
+		"AI icon collapses only the side chat",
+	);
+	taskbar.handleMouse?.({ ...clickEvent(17), type: "press" });
+	taskbar.handleMouse?.(clickEvent(17));
+	check(
+		(tui.layoutRoot.entries?.length ?? 0) === aiExpandedEntries &&
+			renderLayoutFrame(tui.layoutRoot, 140, 40).lines.some((line) => stripTerminalSequences(line).includes("● ETHER")),
+		"AI icon restores the side chat",
+	);
 	taskbar.handleMouse?.({ ...clickEvent(11), type: "press" });
 	taskbar.handleMouse?.(clickEvent(11));
 	let entries = tui.layoutRoot.entries ?? [];

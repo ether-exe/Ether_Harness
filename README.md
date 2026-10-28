@@ -40,8 +40,8 @@ The pieces, briefly:
 
 - **Header (7 rows)** — braille wordmark, model, context bar, live spend, input/output tokens,
   session name, uptime. Fields drop whole from the right when the terminal narrows.
-- **Taskbar (5 cols)** — an icon rail that is always visible. Most icons are honest about being
-  inert; `◫` collapses the side rails.
+- **Taskbar (5 cols)** — an icon rail that is always visible. `◫` collapses all side rails, `✦`
+  toggles just the side chat, and most other icons are honest about being inert.
 - **Files (24 cols)** — the session directory as a tree, auto-refreshing. Clicking a file opens the
   preview; the tree steps aside while it's open.
 - **Preview (47 cols)** — opens in the left slot with line numbers and soft-wrapped prose or
