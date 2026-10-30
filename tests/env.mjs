@@ -17,6 +17,7 @@ export const PI_ROOT = resolvePiRoot();
 export const EXT = join(ROOT, "extensions", "ether-sidebar.ts");
 export const THEME = join(ROOT, "themes", "Ether.json");
 export const THEME_BLUE = join(ROOT, "themes", "Bluether.json");
+export const THEME_MONO = join(ROOT, "themes", "ETHEREX.json");
 const requireDependency = (specifier) => {
 	const resolved = resolvePiDependency(specifier, PI_ROOT);
 	if (!resolved) throw new Error(`Cannot resolve pi dependency: ${specifier}`);

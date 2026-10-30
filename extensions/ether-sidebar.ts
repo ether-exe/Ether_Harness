@@ -14,19 +14,19 @@ import {
 	type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { execFile } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, closeSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { appendFileSync, existsSync, mkdirSync, rmSync, closeSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
+	Editor,
 	HStack,
 	Input,
 	Key,
 	VStack,
 	matchesKey,
 	mixColors,
-	rgbColor,
-	styleText,
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
@@ -54,6 +54,42 @@ const PREVIEW_MIN_TERMINAL = 132;
 const GITHUB_SIDEBAR_WIDTH = 38;
 /** Below this total width the GitHub rail is hidden so the transcript keeps usable columns. */
 const GITHUB_MIN_TERMINAL = 92;
+/** Notes shares the GitHub slot; only one of Notes/GitHub is visible. */
+const NOTES_SIDEBAR_WIDTH = GITHUB_SIDEBAR_WIDTH;
+const NOTES_MIN_TERMINAL = GITHUB_MIN_TERMINAL;
+/** QA rail width: it shares the side-chat slot, so chat and QA take turns. */
+const QA_SIDEBAR_WIDTH = CHAT_SIDEBAR_WIDTH;
+/** Same cutoff as chat; QA is always available wherever the side chat is. */
+const QA_MIN_TERMINAL = CHAT_MIN_TERMINAL;
+/** A browser run gets ten minutes and 120 browser actions before it is stopped. */
+const QA_TIMEOUT_MS = 10 * 60_000;
+const QA_MAX_ACTIONS = 120;
+/** Windows command lines are small; keep the task brief safely under the limit. */
+const QA_MAX_TASK_CHARS = 8000;
+const QA_MAX_ADDRESS_CHARS = 2000;
+const QA_DONE_LIMIT = 40;
+const QA_ARTIFACTS_ROOT =
+	process.env.ETHER_QA_ARTIFACTS_ROOT ?? join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "qa-artifacts");
+const QA_TOOL_PREFIX = "mcp__ether_qa__";
+
+/** The QA subagent's system prompt. The task and address are appended by the parent. */
+const QA_PERSONA = [
+	"You are Ether QA, a careful browser tester in a right rail of a terminal UI.",
+	"You receive only an address and a task. You cannot see the main chat, edit files, or run shell commands.",
+	"Use the browser tools to perform the task on the given address. Stay on that site (the supplied host and its subdomains); do not wander to unrelated sites.",
+	"Start with a short PLAN: 3 to 6 numbered steps.",
+	"Before each tool call after the first, write one short line starting with NEXT: describing the next action.",
+	"Use browser_find before browser_snapshot when you only need to locate an element; use browser_snapshot for page structure.",
+	"If a Flutter/CanvasKit page snapshot is empty or only shows an 'Enable accessibility' button, call enable_flutter_accessibility once, then take a fresh snapshot.",
+	"After an action, wait for the expected text or state, then verify it instead of assuming success.",
+	"Check browser_console_messages and browser_network_requests for errors after important flows.",
+	"Never enter real passwords, payment data, or personal secrets; use only test data from the task.",
+	"For screenshots, omit the filename; the run’s artifact directory names the file.",
+	"Do not take destructive actions unless the task explicitly asks for them.",
+	"When finished, write a plain-English report of one or two short paragraphs: what you did, what you expected, what actually happened, and what is still uncertain.",
+	"End with a line 'VERDICT: PASS', 'VERDICT: FAIL', or 'VERDICT: BLOCKED'.",
+	"If you are blocked by a missing login, unreachable address, or missing test data, stop and report VERDICT: BLOCKED.",
+].join("\n");
 /** GitHub data is cached for five minutes; `r` refreshes immediately. */
 const GITHUB_CACHE_MS = 5 * 60_000;
 /** After a failed sync, wait this long before the ticker tries again. */
@@ -92,8 +128,6 @@ const CHAT_PLACEHOLDER = "type here…";
 const CHAT_COPY_ICON = "⧉";
 const CHAT_REPLY_ICON = "↳";
 const CHAT_ACTION_WIDTH = 5;
-/** User bubble fill: bright enough for near-white text (WCAG 5.5:1), still dark. */
-const SIDE_USER_BG = rgbColor(0x24, 0x5a, 0x9c);
 /** Persisted side-chat settings. Lives in global pi state, not the workspace. */
 const CHAT_AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const CHAT_CONFIG_PATH = process.env.ETHER_CHAT_CONFIG ?? join(CHAT_AGENT_DIR, "chat-sidebar.json");
@@ -104,7 +138,13 @@ const CHAT_HISTORY_RESTORE_MESSAGES = 60;
 /** Far-left taskbar width; reserved for icon columns. */
 const LEFT_SIDEBAR_A_WIDTH = 5;
 /** Keyboard-addressable rails. The taskbar is always visible; the rest follow the viewport. */
-type RailKind = "taskbar" | "files" | "preview" | "chat" | "github";
+type RailKind = "taskbar" | "files" | "preview" | "chat" | "github" | "qa" | "notes";
+
+/**
+ * Files rail control. `auto` follows the width rule; `open` and `closed` are explicit
+ * user choices that survive resizes, layout toggles, previews, and renderer swaps.
+ */
+type FilesState = "auto" | "open" | "closed";
 
 /** Shared keyboard-focus coordinator so every rail enters and leaves focus the same way. */
 interface RailNav {
@@ -116,7 +156,7 @@ interface RailNav {
 }
 
 /** Prototype first column in LeftSidebarA; the second column is intentionally empty. */
-type TaskbarAction = "layout" | "chat" | "github";
+type TaskbarAction = "layout" | "chat" | "github" | "files" | "qa" | "notes";
 
 interface TaskbarIcon {
 	readonly icon: string;
@@ -124,23 +164,17 @@ interface TaskbarIcon {
 	readonly action?: TaskbarAction;
 }
 
+/** Wired actions, spaced from the top of the rail. */
 const TASKBAR_TOP_ICONS: readonly TaskbarIcon[] = [
-	{ icon: "⌂", label: "Home" },
-	{ icon: "▤", label: "Files" },
-	{ icon: "⌕", label: "Search" },
-	{ icon: "⌁", label: "Tools" },
-	{ icon: "⎇", label: "Git" },
+	{ icon: "▤", label: "Files", action: "files" },
 	{ icon: "◫", label: "Layout", action: "layout" },
-	{ icon: "⬡", label: "Extensions" },
-	{ icon: "◷", label: "History" },
 	{ icon: "✦", label: "AI", action: "chat" },
 	{ icon: "⑂", label: "GitHub", action: "github" },
+	{ icon: "✓", label: "QA", action: "qa" },
+	{ icon: "✎", label: "Notes", action: "notes" },
 ];
-const TASKBAR_FOOTER_ICONS: readonly TaskbarIcon[] = [
-	{ icon: "⟳", label: "Reload" },
-	{ icon: "≡", label: "Menu" },
-	{ icon: "?", label: "Help" },
-];
+/** Anchored to the bottom; Settings is a deliberate placeholder until it is wired. */
+const TASKBAR_FOOTER_ICONS: readonly TaskbarIcon[] = [{ icon: "⚙", label: "Settings" }];
 /** VCS metadata is skipped whether it is a directory or a worktree pointer file. */
 const FILE_TREE_SKIP_VCS = new Set([".git", ".hg", ".svn"]);
 /** Heavy/generated directories skipped so the tree stays useful. */
@@ -149,6 +183,18 @@ const FILE_TREE_SKIP_DIRS = new Set([
 	".cache",
 	".next",
 	".turbo",
+	".dart_tool",
+	".idea",
+	".gradle",
+	"Pods",
+	"DerivedData",
+	".expo",
+	".svelte-kit",
+	".angular",
+	".temp",
+	".pub-cache",
+	".pub",
+	"coverage",
 	"dist",
 	"build",
 	"out",
@@ -167,6 +213,10 @@ const FILE_TREE_SKIP_DIRS = new Set([
 const FILE_TREE_SKIP_FILES = new Set([
 	".DS_Store",
 	".localized",
+	".metadata",
+	".flutter-plugins",
+	".flutter-plugins-dependencies",
+	".packages",
 	"Thumbs.db",
 	"ehthumbs.db",
 	"desktop.ini",
@@ -177,6 +227,7 @@ const FILE_TREE_SKIP_FILE_PATTERNS: readonly RegExp[] = [
 	/^#.*#$/, // Emacs autosave files
 	/~$/, // editor backups
 	/\.(swp|swo|swx|pyc|log|tmp)$/i,
+	/\.iml$/i, // IntelliJ module files
 ];
 
 /** One filter used by the Files rail and the side-chat read-only tools. */
@@ -675,6 +726,7 @@ const BAR_CELLS = 6;
 type RailSide = "left" | "right";
 
 interface ThemeLike {
+	name?: string;
 	bg(token: string, text: string): string;
 	fg(token: string, text: string): string;
 	style(text: string, options: { fg?: unknown; bg?: unknown; bold?: boolean; dim?: boolean }): string;
@@ -832,11 +884,9 @@ interface ExtensionContextLike {
 let tick = 0;
 let startedAt = Date.now();
 
-/** Same blue as the tool text, used sparingly on header identity/cost. */
-const TOOL_BLUE = rgbColor(0x3a, 0x7b, 0xcb);
-
-function toolBlueText(theme: ThemeLike, text: string): string {
-	return theme.style(text, { fg: TOOL_BLUE });
+/** Header identity/cost uses the theme's tool accent, which is blue for Ether/Bluether. */
+function toolAccentText(theme: ThemeLike, text: string): string {
+	return theme.fg("toolTitle", text);
 }
 
 /** Busy spinner while the agent works, otherwise a slow breathing dot. */
@@ -944,7 +994,7 @@ class EtherHeader implements Component {
 		const parts: string[] = [];
 		const model = ctx.model;
 
-		if (model?.id) parts.push(toolBlueText(theme, model.id));
+		if (model?.id) parts.push(toolAccentText(theme, model.id));
 
 		const usage = ctx.getContextUsage?.();
 		if (usage && usage.percent !== null && usage.percent !== undefined) {
@@ -957,7 +1007,7 @@ class EtherHeader implements Component {
 		}
 
 		const stats = readStats(ctx);
-		parts.push(toolBlueText(theme, formatCost(stats.totals.cost)));
+		parts.push(toolAccentText(theme, formatCost(stats.totals.cost)));
 		if (stats.totals.input || stats.totals.output) {
 			parts.push(theme.fg("dim", `↑${formatTokens(stats.totals.input)} ↓${formatTokens(stats.totals.output)}`));
 		}
@@ -1036,8 +1086,9 @@ class EtherSidebar implements Component {
 	private readonly side: RailSide;
 	private readonly taskbar: boolean;
 	private readonly onAction?: (action: TaskbarAction) => void;
-	private readonly nav: RailNav;
 	private readonly onInert?: (item: TaskbarIcon) => void;
+	private readonly isActive?: (action: TaskbarAction) => boolean;
+	private readonly nav: RailNav;
 	focused = false;
 	private selectedIcon = "◫";
 
@@ -1049,6 +1100,7 @@ class EtherSidebar implements Component {
 		taskbar = false,
 		onAction?: (action: TaskbarAction) => void,
 		onInert?: (item: TaskbarIcon) => void,
+		isActive?: (action: TaskbarAction) => boolean,
 	) {
 		this.tui = tui;
 		this.getTheme = getTheme;
@@ -1057,6 +1109,7 @@ class EtherSidebar implements Component {
 		this.taskbar = taskbar;
 		this.onAction = onAction;
 		this.onInert = onInert;
+		this.isActive = isActive;
 	}
 
 	invalidate(): void {
@@ -1087,7 +1140,7 @@ class EtherSidebar implements Component {
 
 	private selectedIndex(items: Array<{ item: TaskbarIcon }>): number {
 		const found = items.findIndex((entry) => entry.item.icon === this.selectedIcon);
-		return found >= 0 ? found : Math.min(5, Math.max(0, items.length - 1));
+		return found >= 0 ? found : Math.max(0, items.length - 1);
 	}
 
 	private select(index: number, items: Array<{ item: TaskbarIcon }>): void {
@@ -1170,7 +1223,10 @@ class EtherSidebar implements Component {
 			let content = " ".repeat(fillWidth);
 			const item = items.find((entry) => entry.row === row)?.item;
 			if (item && width >= 3) {
-				const tint = row === selectedRow ? "accent" : "muted";
+				// An open rail is blue; a closed one keeps the rail's muted default. Focus
+				// still shows through the selected row's background.
+				const active = item.action ? this.isActive?.(item.action) === true : false;
+				const tint = active ? "toolTitle" : row === selectedRow ? "accent" : "muted";
 				content = ` ${theme.fg(tint, item.icon)}${ " ".repeat(Math.max(0, fillWidth - 2))}`;
 			}
 			const fill = theme.bg(row === selectedRow ? "selectedBg" : "toolPendingBg", content);
@@ -1643,10 +1699,9 @@ class EtherChatSidebar implements Component {
 	}
 
 	private bubble(theme: ThemeLike, role: ChatRole, text: string, maxWidth: number): string[] {
-		const mode = theme.getColorMode?.() ?? "truecolor";
 		const paint =
 			role === "you"
-				? (line: string) => styleText(line, { bg: SIDE_USER_BG }, mode)
+				? (line: string) => theme.bg("userMessageBg", line)
 				: (line: string) => theme.bg("toolPendingBg", line);
 		const maxText = Math.max(1, maxWidth - 4);
 		const wrap = (width: number): string[] =>
@@ -1661,7 +1716,7 @@ class EtherChatSidebar implements Component {
 
 		const border = (value: string) => theme.fg("borderMuted", value);
 		const top = border("╭" + "─".repeat(Math.max(0, bubbleWidth - 2)) + "╮");
-		const bodyTone = role === "ether" ? "customMessageText" : "text";
+		const bodyTone = role === "ether" ? "customMessageText" : "userMessageText";
 		const body = lines.map((line) => {
 			const clipped = truncateToWidth(line, innerWidth, "…");
 			return (
@@ -1863,7 +1918,7 @@ class EtherChatSidebar implements Component {
 /** LeftSidebarB: "Files" heading plus a collapsible file tree. */
 class EtherFilesSidebar implements Component {
 	private readonly tui: TUI;
-	private readonly getCtx: () => ExtensionContextLike | undefined;
+	private readonly getCwd: () => string;
 	private readonly getTheme: () => ThemeLike;
 	private readonly getActiveFile: () => string | null;
 	private readonly onFileClick: (path: string, viaKeyboard: boolean) => void;
@@ -1879,14 +1934,14 @@ class EtherFilesSidebar implements Component {
 
 	constructor(
 		tui: TUI,
-		getCtx: () => ExtensionContextLike | undefined,
+		getCwd: () => string,
 		getTheme: () => ThemeLike,
 		getActiveFile: () => string | null,
 		onFileClick: (path: string, viaKeyboard: boolean) => void,
 		nav: RailNav,
 	) {
 		this.tui = tui;
-		this.getCtx = getCtx;
+		this.getCwd = getCwd;
 		this.getTheme = getTheme;
 		this.getActiveFile = getActiveFile;
 		this.onFileClick = onFileClick;
@@ -1923,7 +1978,7 @@ class EtherFilesSidebar implements Component {
 	}
 
 	private flatList(): Array<{ node: FileNode; depth: number }> {
-		const cwd = this.getCtx()?.cwd ?? process.cwd();
+		const cwd = this.getCwd();
 		const flat: Array<{ node: FileNode; depth: number }> = [];
 		this.flatten(this.getTree(cwd), 0, flat);
 		return flat;
@@ -2075,7 +2130,7 @@ class EtherFilesSidebar implements Component {
 		const rows = Math.max(1, this.tui.terminal?.rows ?? 24);
 		const fillWidth = Math.max(0, width - 1);
 		const edge = theme.bg("toolPendingBg", theme.fg("borderMuted", "│"));
-		const cwd = this.getCtx()?.cwd ?? process.cwd();
+		const cwd = this.getCwd();
 		const flat: Array<{ node: FileNode; depth: number }> = [];
 		this.flatten(this.getTree(cwd), 0, flat);
 
@@ -2110,7 +2165,7 @@ class EtherFilesSidebar implements Component {
 				} else {
 					const active = this.getActiveFile() === item.node.path;
 					const marker = active ? `${theme.fg("toolTitle", "●")} ` : "  ";
-					const name = selected ? "accent" : active ? "text" : "dim";
+					const name = selected ? "accent" : active ? "muted" : "dim";
 					content = ` ${indent}${marker}${theme.fg(name, item.node.name)}`;
 				}
 				this.rowTargets.set(row + 1, item.node);
@@ -2128,7 +2183,7 @@ class EtherFilesSidebar implements Component {
 
 /* ------------------------------------------------------------- preview rail */
 
-/** Foreground escape for the Dracula palette, matching the terminal's color mode. */
+/** Foreground escape for the preview palette, matching the terminal's color mode. */
 function ansiColor(hex: string, mode: "truecolor" | "256color"): string {
 	const value = hex.replace("#", "");
 	const r = parseInt(value.slice(0, 2), 16);
@@ -2147,11 +2202,11 @@ function ansiColor(hex: string, mode: "truecolor" | "256color"): string {
 	return `\x1b[38;5;${index}m`;
 }
 
-/** RightsidebarB: file preview with line numbers, soft wrap, auto-refresh, and Dracula code colors. */
+/** RightsidebarB: file preview with line numbers, soft wrap, auto-refresh, and theme code colors. */
 class EtherPreviewSidebar implements Component {
 	private readonly tui: TUI;
 	private readonly getTheme: () => ThemeLike;
-	private readonly getCtx: () => ExtensionContextLike | undefined;
+	private readonly getCwd: () => string;
 	private readonly getActiveFile: () => string | null;
 	private readonly onClose: (viaKeyboard: boolean) => void;
 	private readonly nav: RailNav;
@@ -2174,14 +2229,14 @@ class EtherPreviewSidebar implements Component {
 	constructor(
 		tui: TUI,
 		getTheme: () => ThemeLike,
-		getCtx: () => ExtensionContextLike | undefined,
+		getCwd: () => string,
 		getActiveFile: () => string | null,
 		onClose: (viaKeyboard: boolean) => void,
 		nav: RailNav,
 	) {
 		this.tui = tui;
 		this.getTheme = getTheme;
-		this.getCtx = getCtx;
+		this.getCwd = getCwd;
 		this.getActiveFile = getActiveFile;
 		this.onClose = onClose;
 		this.nav = nav;
@@ -2289,7 +2344,9 @@ class EtherPreviewSidebar implements Component {
 			let rendered: string[];
 			if (lang) {
 				const highlighted = highlightCode(expanded.join("\n"), lang);
-				rendered = this.remapDracula(theme, highlighted);
+				// Color themes keep the deliberate Dracula preview; the monochrome
+				// theme uses its own grayscale syntax tokens instead.
+				rendered = theme.name === "ETHEREX" ? highlighted : this.remapDracula(theme, highlighted);
 				if (rendered.length !== expanded.length) {
 					rendered = expanded.map(paintProse);
 				}
@@ -2373,7 +2430,7 @@ class EtherPreviewSidebar implements Component {
 
 	private header(theme: ThemeLike, fillWidth: number, overflow: boolean): string {
 		const file = this.getActiveFile() ?? "";
-		const cwd = this.getCtx()?.cwd ?? process.cwd();
+		const cwd = this.getCwd();
 		let rel = file;
 		try {
 			rel = relative(cwd, file).replace(/\\/g, "/");
@@ -2566,13 +2623,13 @@ class EtherFooter implements Component {
 		const right: string[] = [];
 		if (usage && usage.percent !== null && usage.percent !== undefined) {
 			const window = usage.contextWindow || ctx?.model?.contextWindow || 0;
-			right.push(field("CTX", toolBlueText(theme, `${usage.percent.toFixed(1)}%/${formatTokens(window)}`)));
+			right.push(field("CTX", toolAccentText(theme, `${usage.percent.toFixed(1)}%/${formatTokens(window)}`)));
 		} else if (ctx?.model?.contextWindow) {
-			right.push(field("CTX", toolBlueText(theme, `?/${formatTokens(ctx.model.contextWindow)}`)));
+			right.push(field("CTX", toolAccentText(theme, `?/${formatTokens(ctx.model.contextWindow)}`)));
 		}
 
 		if (stats?.cacheHit !== undefined && (stats.totals.cacheRead > 0 || stats.totals.cacheWrite > 0)) {
-			right.push(field("CH", toolBlueText(theme, `${stats.cacheHit.toFixed(0)}%`)));
+			right.push(field("CH", toolAccentText(theme, `${stats.cacheHit.toFixed(0)}%`)));
 		}
 
 		const details: string[] = [];
@@ -2623,7 +2680,7 @@ class EtherFooter implements Component {
 		if (stats && (stats.totals.input || stats.totals.output)) {
 			metrics.push(stat("TOK", theme.fg("dim", `↑${formatTokens(stats.totals.input)} ↓${formatTokens(stats.totals.output)}`)));
 		}
-		if (stats) metrics.push(stat("COST", toolBlueText(theme, formatCost(stats.totals.cost))));
+		if (stats) metrics.push(stat("COST", toolAccentText(theme, formatCost(stats.totals.cost))));
 		if (ctx?.model?.id) {
 			const thinking = ctx.model.reasoning && ctx.thinkingLevel ? ` · ${ctx.thinkingLevel}` : "";
 			metrics.push(stat("MODEL", theme.fg("dim", `${ctx.model.id}${thinking}`)));
@@ -3499,6 +3556,1079 @@ class EtherGithubSidebar implements Component {
 	}
 }
 
+/* --------------------------------------------------------------------- qa rail */
+
+type QaState = "idle" | "running" | "stopping" | "stopped" | "done" | "error";
+
+/** How the parent launches another pi process for the QA persona. */
+function qaPiInvocation(args: string[]): { command: string; args: string[] } {
+	const fixture = process.env.ETHER_QA_PI;
+	if (fixture) return { command: process.execPath, args: [fixture, ...args] };
+	const current = process.argv[1];
+	if (current && existsSync(current)) return { command: process.execPath, args: [current, ...args] };
+	return { command: process.platform === "win32" ? "pi.cmd" : "pi", args };
+}
+
+/** The browser-tool extension loaded only by the QA child. */
+function qaAgentFile(): string {
+	const override = process.env.ETHER_QA_AGENT;
+	if (override) return override;
+	try {
+		const sibling = join(dirname(fileURLToPath(import.meta.url)), "..", "qa", "ether-qa-agent.ts");
+		if (existsSync(sibling)) return sibling;
+	} catch {
+		// fall through to the installed path
+	}
+	return join(CHAT_AGENT_DIR, "qa", "ether-qa-agent.ts");
+}
+
+function isLoopbackHost(host: string): boolean {
+	const value = host.toLowerCase();
+	return value === "localhost" || value === "127.0.0.1" || value === "::1" || value === "[::1]";
+}
+
+/** A local or public http(s) address; the browser gate still scopes navigation. */
+function normalizeQaAddress(raw: string): { url?: string; origin?: string; error?: string } {
+	const text = raw.trim();
+	if (!text) return { error: "enter an address" };
+	if (text.length > QA_MAX_ADDRESS_CHARS) return { error: "that address is too long" };
+	const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(text) ? text : `http://${text}`;
+	let url: URL;
+	try {
+		url = new URL(withScheme);
+	} catch {
+		return { error: "that address is not a valid URL" };
+	}
+	if (url.protocol !== "http:" && url.protocol !== "https:") return { error: "use an http or https address" };
+	return { url: url.toString(), origin: url.origin };
+}
+
+function qaElapsed(ms: number): string {
+	const total = Math.max(0, Math.floor(ms / 1000));
+	return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
+function qaToolName(toolName: string): string {
+	return toolName.startsWith(QA_TOOL_PREFIX) ? toolName.slice(QA_TOOL_PREFIX.length) : toolName;
+}
+
+function qaShort(value: unknown, max = 48): string {
+	if (typeof value !== "string") return "";
+	return truncateToWidth(value.replace(/\s+/g, " ").trim(), max, "…");
+}
+
+/** One readable line for the DONE/NOW log. Typed text is never echoed. */
+function formatQaAction(toolName: string, args: unknown): string {
+	const name = qaToolName(toolName);
+	const input = (args ?? {}) as Record<string, unknown>;
+	switch (name) {
+		case "browser_navigate":
+			return `open ${qaShort(input.url, 70)}`;
+		case "browser_click":
+			return `click ${qaShort(input.target ?? input.element, 60)}`;
+		case "browser_type":
+			return `type ${qaShort(input.target ?? input.element, 60)}`;
+		case "browser_fill_form":
+			return `fill form ${Array.isArray(input.fields) ? `(${input.fields.length} fields)` : ""}`.trim();
+		case "browser_press_key":
+			return `press ${qaShort(input.key, 24)}`;
+		case "browser_select_option":
+			return `select ${qaShort(input.target, 48)}`;
+		case "browser_find":
+			return `find ${qaShort(input.text ?? input.regex, 60)}`;
+		case "browser_snapshot":
+			return "snapshot";
+		case "browser_wait_for":
+			return `wait ${qaShort(input.text ?? input.time, 40)}`;
+		case "browser_handle_dialog":
+			return input.accept === false ? "dismiss dialog" : "accept dialog";
+		case "browser_console_messages":
+			return "console";
+		case "browser_network_requests":
+			return `network ${qaShort(input.filter, 36)}`.trim();
+		case "browser_take_screenshot":
+			return "screenshot";
+		case "browser_close":
+			return "close browser";
+		default:
+			return name;
+	}
+}
+
+function qaNextLine(text: string): string | null {
+	const matches = [...text.matchAll(/^\s*NEXT:\s*(.+)$/gim)];
+	if (matches.length > 0) return matches[matches.length - 1]?.[1]?.trim() ?? null;
+	const plain = text.replace(/```[\s\S]*?```/g, " ").replace(/\s+/g, " ").trim();
+	if (!plain) return null;
+	const sentences = plain.split(/(?<=[.!?])\s+/);
+	const last = sentences[sentences.length - 1]?.trim() ?? "";
+	return last || null;
+}
+
+function qaVerdict(text: string): string | null {
+	const match = text.match(/VERDICT:\s*(PASS|FAIL|BLOCKED)/i);
+	return match ? match[1]!.toUpperCase() : null;
+}
+
+function cleanQaReport(text: string): string {
+	return text
+		.split("\n")
+		.filter((line) => !/^\s*(NEXT|VERDICT):\s*/i.test(line))
+		.join("\n")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
+}
+
+function qaMessageText(message: unknown): string {
+	const content = (message as { content?: unknown } | undefined)?.content;
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.map((part) => {
+			const item = part as { type?: string; text?: unknown };
+			return item?.type === "text" && typeof item.text === "string" ? item.text : "";
+		})
+		.join("");
+}
+
+/**
+ * RightSidebarQ: a self-contained browser-testing persona.
+ *
+ * It shares the side-chat slot, owns the address/task form, and runs the actual
+ * browser work in a separate pi process so the main session's tools and context
+ * never enter the QA thread.
+ */
+class EtherQaSidebar implements Component {
+	focused = false;
+	private readonly tui: TUI;
+	private readonly getTheme: () => ThemeLike;
+	private readonly getModel: () => string | undefined;
+	private readonly getThinking: () => string | undefined;
+	private readonly nav: RailNav;
+	private readonly addressInput: Input;
+	private readonly taskEditor: Editor;
+	private field: "address" | "task" = "address";
+	private state: QaState = "idle";
+	private child?: ChildProcess;
+	private stopTimer?: ReturnType<typeof setTimeout>;
+	private runId = 0;
+	private artifactsDir?: string;
+	private personaPath?: string;
+	private startedAt = 0;
+	private endedAt = 0;
+	private actionCount = 0;
+	private done: Array<{ text: string; error: boolean }> = [];
+	private now: string | null = null;
+	private next: string | null = null;
+	private liveText = "";
+	private lastAssistantText = "";
+	private currentText = "";
+	private report = "";
+	private verdict: string | null = null;
+	private error: string | null = null;
+	private stderrText = "";
+	private usage = { input: 0, output: 0, cost: 0 };
+	private reportScroll = 0;
+	private maxReportScroll = 0;
+	private reportFollow = true;
+	private bodyTop = 0;
+	private bodyBottom = 0;
+	private buttonRow = -1;
+	private startRange: [number, number] = [0, 0];
+	private resetRange: [number, number] = [0, 0];
+	private resetShown = false;
+	private addressRow = -1;
+	private taskTop = -1;
+	private taskHeight = 0;
+
+	constructor(
+		tui: TUI,
+		getTheme: () => ThemeLike,
+		getModel: () => string | undefined,
+		getThinking: () => string | undefined,
+		nav: RailNav,
+	) {
+		this.tui = tui;
+		this.getTheme = getTheme;
+		this.getModel = getModel;
+		this.getThinking = getThinking;
+		this.nav = nav;
+		const editorTui = {
+			terminal: {
+				get rows() {
+					return 10;
+				},
+				get columns() {
+					return tui.terminal?.columns ?? 80;
+				},
+			},
+			requestRender: () => tui.requestRender(),
+			setFocus: (component: Component | null) => {
+				(tui as unknown as { setFocus?: (target: Component | null) => void }).setFocus?.(component);
+			},
+		} as unknown as TUI;
+		const theme = getTheme();
+		this.addressInput = new Input({
+			prompt: ` ${theme.fg("toolTitle", "▸")} `,
+			placeholder: "type or paste a URL",
+			placeholderStyle: (text) => getTheme().fg("dim", text),
+		});
+		this.addressInput.onSubmit = () => {
+			if (!this.editable()) return;
+			this.field = "task";
+			this.tui.requestRender();
+		};
+		this.taskEditor = new Editor(
+			editorTui,
+			{
+				borderColor: (text) => getTheme().fg("borderMuted", text),
+				selectList: {
+					selectedPrefix: (text) => getTheme().fg("accent", text),
+					selectedText: (text) => getTheme().fg("accent", text),
+					description: (text) => getTheme().fg("dim", text),
+					scrollInfo: (text) => getTheme().fg("dim", text),
+					noMatch: (text) => getTheme().fg("dim", text),
+				},
+			},
+			{ paddingX: 0 },
+		);
+		this.taskEditor.disableSubmit = true;
+	}
+
+	invalidate(): void {
+		this.addressInput.invalidate();
+		this.taskEditor.invalidate();
+	}
+
+	/** The chrome calls this from its animation ticker. */
+	tick(): void {
+		if (this.state === "running" && this.startedAt && Date.now() - this.startedAt > QA_TIMEOUT_MS) {
+			this.stop("Timed out after 10 minutes");
+		}
+	}
+
+	/** Stop the child and close its MCP browser when the session goes away. */
+	dispose(): void {
+		this.runId += 1;
+		this.killChild();
+		this.child = undefined;
+		this.clearStopTimer();
+	}
+
+	private editable(): boolean {
+		return this.state !== "running" && this.state !== "stopping";
+	}
+
+	private resetVisible(): boolean {
+		return this.state === "stopped" || this.state === "done" || this.state === "error";
+	}
+
+	private transition(state: QaState): void {
+		this.state = state;
+		this.tui.requestRender();
+	}
+
+	private stopNote = "Stopped by user";
+
+	private clearStopTimer(): void {
+		if (this.stopTimer) clearTimeout(this.stopTimer);
+		this.stopTimer = undefined;
+	}
+
+	private clearRunState(): void {
+		this.done = [];
+		this.now = null;
+		this.next = null;
+		this.liveText = "";
+		this.lastAssistantText = "";
+		this.currentText = "";
+		this.report = "";
+		this.verdict = null;
+		this.error = null;
+		this.stderrText = "";
+		this.usage = { input: 0, output: 0, cost: 0 };
+		this.actionCount = 0;
+		this.reportScroll = 0;
+		this.maxReportScroll = 0;
+		this.reportFollow = true;
+	}
+
+	/** Focus the first empty field when the rail opens, so a paste goes somewhere useful. */
+	focusForInput(): void {
+		if (!this.editable()) return;
+		this.field = this.addressInput.getValue().trim() ? "task" : "address";
+		this.nav.enter(this);
+		this.tui.requestRender();
+	}
+
+	start(): void {
+		if (this.state === "running" || this.state === "stopping") return;
+		if (this.child) {
+			this.error = "the previous run is still closing — press Reset";
+			this.tui.requestRender();
+			return;
+		}
+		const addressText = this.addressInput.getValue().trim();
+		const address = normalizeQaAddress(addressText);
+		const task = this.taskEditor.getExpandedText().trim();
+		if (address.error || !address.url || !address.origin) {
+			this.error =
+				!addressText && /^https?:\/\/\S+$/i.test(task)
+					? "address is empty — put that URL in ADDRESS above"
+					: address.error ?? "enter an address";
+			this.field = "address";
+			this.nav.enter(this);
+			this.tui.requestRender();
+			return;
+		}
+		if (!task) {
+			this.error = "enter a task";
+			this.field = "task";
+			this.nav.enter(this);
+			this.tui.requestRender();
+			return;
+		}
+		if (task.length > QA_MAX_TASK_CHARS) {
+			this.error = `the task is too long (max ${QA_MAX_TASK_CHARS} characters)`;
+			this.field = "task";
+			this.nav.enter(this);
+			this.tui.requestRender();
+			return;
+		}
+		const agent = qaAgentFile();
+		if (!existsSync(agent)) {
+			this.error = "QA agent extension is missing — reinstall Ether Harness";
+			this.tui.requestRender();
+			return;
+		}
+
+		this.runId += 1;
+		const runId = this.runId;
+		this.clearRunState();
+		this.state = "running";
+		this.startedAt = Date.now();
+		this.endedAt = 0;
+		this.stopNote = "Stopped by user";
+		this.artifactsDir = join(
+			QA_ARTIFACTS_ROOT,
+			`${new Date().toISOString().replace(/[:.]/g, "-")}-${runId}`,
+		);
+		this.personaPath = join(this.artifactsDir, "persona.md");
+		try {
+			mkdirSync(this.artifactsDir, { recursive: true });
+			writeFileSync(this.personaPath, QA_PERSONA, "utf8");
+		} catch (error) {
+			this.state = "error";
+			this.error = error instanceof Error ? error.message : "could not prepare QA artifacts";
+			this.tui.requestRender();
+			return;
+		}
+
+		const args = [
+			"--mode",
+			"json",
+			"-p",
+			"--no-session",
+			"-ne",
+			"-e",
+			"builtin:mcp",
+			"-e",
+			agent,
+			"--no-builtin-tools",
+			"--append-system-prompt",
+			this.personaPath,
+		];
+		const model = this.getModel();
+		if (model) args.push("--model", model);
+		const thinking = this.getThinking();
+		if (thinking) args.push("--thinking", thinking);
+		args.push(`Address: ${address.url}\nTask:\n${task}\n`);
+
+		const invocation = qaPiInvocation(args);
+		const env = {
+			...process.env,
+			ETHER_QA_ORIGIN: address.origin,
+			ETHER_QA_ARTIFACTS: this.artifactsDir,
+			ETHER_QA_MAX_ACTIONS: String(QA_MAX_ACTIONS),
+		};
+		try {
+			this.child = spawn(invocation.command, invocation.args, {
+				cwd: this.artifactsDir,
+				env,
+				stdio: ["ignore", "pipe", "pipe"],
+				detached: process.platform !== "win32",
+				windowsHide: true,
+			});
+		} catch (error) {
+			this.state = "error";
+			this.error = error instanceof Error ? error.message : "could not start the QA process";
+			this.tui.requestRender();
+			return;
+		}
+
+		const child = this.child;
+		child.stdout?.setEncoding("utf8");
+		child.stderr?.setEncoding("utf8");
+		let buffer = "";
+		child.stdout?.on("data", (chunk: string) => {
+			if (this.runId !== runId) return;
+			buffer += chunk;
+			let newline = buffer.indexOf("\n");
+			while (newline >= 0) {
+				const line = buffer.slice(0, newline).replace(/\r$/, "");
+				buffer = buffer.slice(newline + 1);
+				if (line.trim()) this.handleLine(line);
+				newline = buffer.indexOf("\n");
+			}
+		});
+		child.stderr?.on("data", (chunk: string) => {
+			if (this.runId !== runId) return;
+			this.stderrText = (this.stderrText + chunk).slice(-8000);
+		});
+		child.on("error", (error) => {
+			if (this.runId !== runId) return;
+			this.error = error.message;
+			this.finish("error", error.message);
+		});
+		child.on("exit", (code) => {
+			if (this.runId !== runId) return;
+			this.handleExit(code);
+		});
+		this.tui.requestRender();
+	}
+
+	stop(note = "Stopped by user"): void {
+		if (this.state !== "running") return;
+		this.stopNote = note;
+		this.state = "stopping";
+		this.now = null;
+		this.killChild();
+		this.clearStopTimer();
+		this.stopTimer = setTimeout(() => {
+			if (this.state !== "stopping") return;
+			this.killChild();
+			this.child = undefined;
+			this.finish("stopped", this.stopNote);
+		}, 3000);
+		this.tui.requestRender();
+	}
+
+	reset(): void {
+		this.runId += 1;
+		this.killChild();
+		this.child = undefined;
+		this.clearStopTimer();
+		this.state = "idle";
+		this.startedAt = 0;
+		this.endedAt = 0;
+		this.stopNote = "Stopped by user";
+		this.clearRunState();
+		this.addressInput.setValue("");
+		this.taskEditor.setText("");
+		this.field = "address";
+		if (this.artifactsDir) {
+			try {
+				rmSync(this.artifactsDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+			} catch {
+				// best effort; a browser may still be releasing a screenshot handle
+			}
+		}
+		this.artifactsDir = undefined;
+		this.personaPath = undefined;
+		this.tui.requestRender();
+	}
+
+	private killChild(): void {
+		const child = this.child;
+		const pid = child?.pid;
+		if (!child || !pid) return;
+		if (process.platform === "win32") {
+			execFile("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true }, () => {});
+			return;
+		}
+		try {
+			process.kill(-pid, "SIGTERM");
+		} catch {
+			try {
+				child.kill("SIGTERM");
+			} catch {
+				// already gone
+			}
+		}
+		setTimeout(() => {
+			try {
+				process.kill(-pid, "SIGKILL");
+			} catch {
+				try {
+					child.kill("SIGKILL");
+				} catch {
+					// already gone
+				}
+			}
+		}, 2500).unref?.();
+	}
+
+	private handleExit(code: number | null): void {
+		this.child = undefined;
+		this.clearStopTimer();
+		if (this.state === "stopping") {
+			this.finish("stopped", this.stopNote);
+			return;
+		}
+		if (this.state === "running") {
+			if (this.error || code !== 0) {
+				this.finish("error", this.error ?? this.stderrText.trim().slice(-2000) ?? `QA process exited with code ${code}`);
+			} else this.finish("done");
+			return;
+		}
+		this.tui.requestRender();
+	}
+
+	private finish(state: "stopped" | "done" | "error", note?: string): void {
+		if (this.state === "done" || this.state === "stopped" || this.state === "error") return;
+		this.state = state;
+		this.endedAt = Date.now();
+		this.now = null;
+		const raw = this.lastAssistantText || this.liveText || this.currentText || this.report;
+		const text = cleanQaReport(raw);
+		this.report =
+			text ||
+			(note ??
+				(state === "error"
+					? this.error ?? this.stderrText.trim().slice(-2000) ?? "The QA run failed."
+					: state === "stopped"
+						? `Stopped after ${this.actionCount} action${this.actionCount === 1 ? "" : "s"}.`
+						: "The QA run finished without a report."));
+		this.verdict = qaVerdict(raw) ?? qaVerdict(this.report);
+		this.reportFollow = true;
+		this.clearStopTimer();
+		this.tui.requestRender();
+	}
+
+	private handleLine(line: string): void {
+		let event: Record<string, unknown>;
+		try {
+			event = JSON.parse(line) as Record<string, unknown>;
+		} catch {
+			return;
+		}
+		if (this.state !== "running") return;
+		const type = event.type;
+		if (type === "message_start") {
+			const message = event.message as { role?: string } | undefined;
+			if (message?.role === "assistant") this.currentText = "";
+			return;
+		}
+		if (type === "message_update") {
+			const update = event.assistantMessageEvent as
+				| { type?: string; delta?: string }
+				| undefined;
+			if (update?.type === "text_delta" && typeof update.delta === "string") {
+				this.currentText += update.delta;
+				this.liveText = this.currentText;
+				this.next = qaNextLine(this.currentText) ?? this.next;
+				this.tui.requestRender();
+			}
+			return;
+		}
+		if (type === "message_end") {
+			const message = event.message as
+				| { role?: string; content?: unknown; usage?: unknown; stopReason?: string; errorMessage?: string }
+				| undefined;
+			if (message?.role !== "assistant") return;
+			const text = qaMessageText(message);
+			if (text.trim()) {
+				this.lastAssistantText = text;
+				this.liveText = text;
+				this.next = qaNextLine(text) ?? this.next;
+				this.verdict = qaVerdict(text);
+			}
+			const usage = message.usage as
+				| { input?: number; output?: number; cost?: number | { total?: number } }
+				| undefined;
+			if (usage) {
+				if (typeof usage.input === "number") this.usage.input += usage.input;
+				if (typeof usage.output === "number") this.usage.output += usage.output;
+				const cost = typeof usage.cost === "number" ? usage.cost : usage.cost?.total;
+				if (typeof cost === "number") this.usage.cost += cost;
+			}
+			if (message.stopReason === "error") {
+				this.error = message.errorMessage ?? "the QA model ended with an error";
+			} else if (this.error) {
+				// A successful retry clears an earlier transient model error.
+				this.error = null;
+			}
+			return;
+		}
+		if (type === "tool_execution_start") {
+			this.actionCount += 1;
+			this.now = formatQaAction(String(event.toolName ?? ""), event.args);
+			if (this.actionCount > QA_MAX_ACTIONS + 5) this.stop("QA action limit reached");
+			this.tui.requestRender();
+			return;
+		}
+		if (type === "tool_execution_end") {
+			const text = this.now ?? formatQaAction(String(event.toolName ?? ""), event.args);
+			this.done.push({ text, error: event.isError === true });
+			if (this.done.length > QA_DONE_LIMIT) this.done = this.done.slice(-QA_DONE_LIMIT);
+			this.now = null;
+			this.tui.requestRender();
+			return;
+		}
+		if (type === "agent_settled") {
+			if (event.aborted === true) this.finish("stopped", "Stopped by user");
+			else if (this.error) this.finish("error", this.error);
+			else this.finish("done");
+		}
+	}
+
+	private stateText(): string {
+		switch (this.state) {
+			case "running":
+				return `running ${qaElapsed(Date.now() - this.startedAt)}`;
+			case "stopping":
+				return "stopping…";
+			case "done":
+				return `done ${qaElapsed(this.endedAt - this.startedAt)}`;
+			case "stopped":
+				return "stopped";
+			case "error":
+				return "error";
+			default:
+				return "idle";
+		}
+	}
+
+	private stateColor(): string {
+		switch (this.state) {
+			case "running":
+				return "toolTitle";
+			case "stopping":
+			case "stopped":
+				return "warning";
+			case "done":
+				return "success";
+			case "error":
+				return "error";
+			default:
+				return "dim";
+		}
+	}
+
+	private header(theme: ThemeLike, fillWidth: number): string {
+		const label = ` ${theme.fg("toolTitle", "✓")} ${theme.fg(this.focused ? "toolTitle" : "muted", "QA")}`;
+		const status = theme.fg(this.stateColor(), this.stateText());
+		const gap = Math.max(1, fillWidth - visibleWidth(label) - visibleWidth(status) - 1);
+		return label + " ".repeat(gap) + status + " ";
+	}
+
+	private labelLine(
+		theme: ThemeLike,
+		fillWidth: number,
+		left: string,
+		right: string,
+		rightColor = "dim",
+	): string {
+		const leftText = ` ${theme.fg("dim", left)}`;
+		const rightText = right ? theme.fg(rightColor, right) : "";
+		const gap = Math.max(1, fillWidth - visibleWidth(leftText) - visibleWidth(rightText) - 1);
+		return leftText + " ".repeat(gap) + rightText + " ";
+	}
+
+	private addressHint(): string {
+		const parsed = normalizeQaAddress(this.addressInput.getValue());
+		if (parsed.error || !parsed.url) return "local or public";
+		try {
+			const host = new URL(parsed.url).hostname.toLowerCase();
+			return isLoopbackHost(host) ? "localhost" : "public site";
+		} catch {
+			return "local or public";
+		}
+	}
+
+	private addressLine(theme: ThemeLike, fillWidth: number): string {
+		const inputWidth = Math.max(6, fillWidth - 2);
+		this.addressInput.focused = this.focused && this.field === "address" && this.editable();
+		if (this.addressInput.focused) {
+			const line = this.addressInput.render(inputWidth)[0] ?? "";
+			return ` ${line}`;
+		}
+		const draft = this.addressInput.getValue();
+		const hasDraft = draft.trim().length > 0;
+		const text = truncateToWidth(hasDraft ? draft : "http://localhost:3000", Math.max(1, fillWidth - 5), "…");
+		return ` ${theme.fg("toolTitle", "▸")} ${theme.fg(hasDraft ? "text" : "dim", text)}`;
+	}
+
+	private buttons(theme: ThemeLike, fillWidth: number): string {
+		const running = this.state === "running";
+		const stopping = this.state === "stopping";
+		const label = running ? "STOP" : stopping ? "STOPPING" : "START";
+		const start = `[ ${label} ]`;
+		const startColor = stopping ? "dim" : running ? "error" : "toolTitle";
+		this.startRange = [1, 1 + visibleWidth(start) - 1];
+		this.resetShown = this.resetVisible();
+		const reset = "[ RESET ]";
+		this.resetRange = this.resetShown ? [this.startRange[1] + 3, this.startRange[1] + 3 + visibleWidth(reset) - 1] : [0, 0];
+		const resetText = this.resetShown ? `  ${theme.fg("warning", reset)}` : "";
+		return ` ${theme.fg(startColor, start)}${resetText}`;
+	}
+
+	private statusLine(theme: ThemeLike, fillWidth: number): string {
+		const parts: string[] = [];
+		if (this.startedAt) parts.push(qaElapsed((this.endedAt || Date.now()) - this.startedAt));
+		if (this.actionCount) parts.push(`${this.actionCount} act`);
+		if (this.usage.cost) parts.push(formatCost(this.usage.cost));
+		if (parts.length === 0) parts.push("local or public");
+		parts.push(this.state === "running" ? "alt+enter stop" : "alt+enter start");
+		return ` ${theme.fg("dim", truncateToWidth(parts.join(" · "), Math.max(1, fillWidth - 2), "…"))}`;
+	}
+
+	private sectionLabel(theme: ThemeLike, label: string): string {
+		return ` ${theme.fg("dim", label)}`;
+	}
+
+	private reportLabel(theme: ThemeLike): string {
+		const color =
+			this.verdict === "PASS"
+				? "success"
+				: this.verdict === "FAIL"
+					? "error"
+					: this.verdict === "BLOCKED"
+						? "warning"
+						: "dim";
+		const suffix = this.verdict ? ` ${theme.fg(color, this.verdict)}` : "";
+		return ` ${theme.fg("dim", this.state === "error" ? "ERROR" : "REPORT")}${suffix}`;
+	}
+
+	private reportText(): string {
+		if (this.state === "error") return this.report || this.error || "The QA run failed.";
+		if (this.state === "running" || this.state === "stopping") {
+			return cleanQaReport(this.liveText) || "waiting for the first observation…";
+		}
+		return this.report || this.error || "No report.";
+	}
+
+	private sections(theme: ThemeLike, fillWidth: number, available: number): string[] {
+		if (available <= 0) return [];
+		if (this.state === "idle") {
+			const problem = this.error?.trim();
+			const out = [this.sectionLabel(theme, problem ? "ERROR" : "READY")];
+			const hint = wrapTextWithAnsi(
+				problem ||
+					"Enter a local or public http(s) address and describe what to test. The browser starts in an isolated profile; it does not share your logins.",
+				Math.max(1, fillWidth - 2),
+			);
+			for (const line of hint.slice(0, Math.max(1, available - 1))) {
+				out.push(` ${theme.fg(problem ? "error" : "dim", line)}`);
+			}
+			return out.slice(0, available);
+		}
+
+		const out: string[] = [];
+		const doneLimit = this.state === "running" || this.state === "stopping" ? 3 : 4;
+		const done = this.done.slice(-doneLimit);
+		if (done.length > 0) {
+			out.push(this.sectionLabel(theme, "DONE"));
+			for (const item of done) {
+				const icon = item.error ? theme.fg("error", "✗") : theme.fg("success", "✓");
+				out.push(
+					` ${icon} ${theme.fg(item.error ? "error" : "muted", truncateToWidth(item.text, Math.max(1, fillWidth - 4), "…"))}`,
+				);
+			}
+		}
+		if (this.state === "running" || this.state === "stopping") {
+			out.push(this.sectionLabel(theme, "NOW"));
+			out.push(
+				` ${theme.fg("toolTitle", "→")} ${theme.fg("text", truncateToWidth(this.now ?? "thinking…", Math.max(1, fillWidth - 4), "…"))}`,
+			);
+			out.push(this.sectionLabel(theme, "NEXT"));
+			const nextLines = wrapTextWithAnsi(this.next ?? "waiting for the model…", Math.max(1, fillWidth - 2)).slice(-2);
+			for (const line of nextLines) out.push(` ${theme.fg("dim", line)}`);
+		}
+
+		out.push(this.reportLabel(theme));
+		const reportLines = wrapTextWithAnsi(this.reportText(), Math.max(1, fillWidth - 2));
+		const room = Math.max(1, available - out.length);
+		this.maxReportScroll = Math.max(0, reportLines.length - room);
+		if (this.reportFollow) this.reportScroll = this.maxReportScroll;
+		this.reportScroll = Math.max(0, Math.min(this.reportScroll, this.maxReportScroll));
+		for (const line of reportLines.slice(this.reportScroll, this.reportScroll + room)) out.push(` ${line}`);
+		if (out.length > available) out.length = available;
+		return out;
+	}
+
+	render(width: number): string[] {
+		if (width <= 0) return [];
+		const theme = this.getTheme();
+		const rows = Math.max(1, this.tui.terminal?.rows ?? 24);
+		const fillWidth = Math.max(0, width - 1);
+		const lines: string[] = [];
+		lines.push(this.header(theme, fillWidth));
+		const addressHint = this.addressHint();
+		lines.push(
+			this.labelLine(theme, fillWidth, "ADDRESS", addressHint, addressHint === "public site" ? "warning" : "dim"),
+		);
+		this.addressRow = lines.length;
+		lines.push(this.addressLine(theme, fillWidth));
+		lines.push(this.labelLine(theme, fillWidth, "TASK", "paste supported"));
+		this.taskEditor.focused = this.focused && this.field === "task" && this.editable();
+		const taskWidth = Math.max(10, fillWidth - 2);
+		const taskLines = this.taskEditor.render(taskWidth);
+		this.taskTop = lines.length;
+		this.taskHeight = taskLines.length;
+		for (const line of taskLines) lines.push(` ${line}`);
+		this.buttonRow = lines.length;
+		lines.push(this.buttons(theme, fillWidth));
+		this.bodyTop = lines.length;
+		const available = Math.max(0, rows - lines.length - 1);
+		lines.push(...this.sections(theme, fillWidth, available));
+		this.bodyBottom = rows - 2;
+		while (lines.length < rows - 1) lines.push("");
+		if (lines.length > rows - 1) lines.length = rows - 1;
+		lines.push(this.statusLine(theme, fillWidth));
+		const edge = theme.bg("toolPendingBg", theme.fg("borderMuted", "│"));
+		return lines.slice(0, rows).map((line) => edge + this.matte(theme, line, fillWidth));
+	}
+
+	private matte(theme: ThemeLike, text: string, width: number): string {
+		let out = text;
+		if (visibleWidth(out) > width) out = truncateToWidth(out, width, "");
+		if (visibleWidth(out) < width) out += " ".repeat(width - visibleWidth(out));
+		return theme.bg("toolPendingBg", out);
+	}
+
+	private scrollReport(delta: number): void {
+		if (delta === 0) return;
+		this.reportFollow = false;
+		this.reportScroll = Math.max(0, Math.min(this.maxReportScroll, this.reportScroll + delta));
+		if (this.reportScroll >= this.maxReportScroll) this.reportFollow = true;
+		this.tui.requestRender();
+	}
+
+	handleInput(data: string): void {
+		if (matchesKey(data, "tab")) {
+			this.nav.cycle(1);
+			return;
+		}
+		if (matchesKey(data, "shift+tab")) {
+			this.nav.cycle(-1);
+			return;
+		}
+		if (matchesKey(data, "escape")) {
+			this.nav.leave();
+			return;
+		}
+		if (matchesKey(data, "alt+enter") || matchesKey(data, "ctrl+enter")) {
+			if (this.state === "running") this.stop();
+			else if (this.editable()) this.start();
+			return;
+		}
+		if (matchesKey(data, "ctrl+r") && this.resetVisible()) {
+			this.reset();
+			return;
+		}
+		if (matchesKey(data, "pageUp")) {
+			this.scrollReport(-Math.max(1, this.bodyBottom - this.bodyTop - 1));
+			return;
+		}
+		if (matchesKey(data, "pageDown")) {
+			this.scrollReport(Math.max(1, this.bodyBottom - this.bodyTop - 1));
+			return;
+		}
+		if (!this.editable()) return;
+		if (this.field === "address") {
+			this.addressInput.focused = this.focused;
+			this.addressInput.handleInput(data);
+		} else {
+			this.taskEditor.focused = this.focused;
+			this.taskEditor.handleInput(data);
+		}
+	}
+
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (event.type === "wheel") {
+			const delta = Math.trunc(event.wheelDelta ?? 0);
+			this.scrollReport(delta);
+			return delta === 0 ? undefined : { handled: true };
+		}
+		if (event.button !== "left") return undefined;
+		const x = event.x - 1;
+		if (event.y === this.buttonRow) {
+			if (x >= this.startRange[0] && x <= this.startRange[1]) {
+				if (event.type === "press") return { handled: true, render: false };
+				// mousedown targets the button; only the final click acts. Acting
+				// on release would start the run and then immediately stop it.
+				if (event.type !== "click") return { handled: true };
+				if (this.state === "running") this.stop();
+				else if (this.editable()) this.start();
+				return { handled: true };
+			}
+			if (this.resetShown && x >= this.resetRange[0] && x <= this.resetRange[1]) {
+				if (event.type === "press") return { handled: true, render: false };
+				if (event.type !== "click") return { handled: true };
+				this.reset();
+				return { handled: true };
+			}
+			return undefined;
+		}
+		if (event.y === this.addressRow && x > 0) {
+			this.nav.enter(this);
+			this.field = "address";
+			this.addressInput.handleMouse({ ...event, x: Math.max(0, event.x - 2) });
+			this.tui.requestRender();
+			return { handled: true };
+		}
+		if (event.y >= this.taskTop && event.y < this.taskTop + this.taskHeight && x > 0) {
+			this.nav.enter(this);
+			this.field = "task";
+			this.taskEditor.handleMouse({ ...event, x: Math.max(0, event.x - 2), y: event.y - this.taskTop });
+			this.tui.requestRender();
+			return { handled: true };
+		}
+		return undefined;
+	}
+}
+
+/* ------------------------------------------------------------------ notes rail */
+
+/**
+ * RightSidebarN: a session-only notepad. The text lives in this component, so it
+ * disappears when the extension runtime/session is replaced. Nothing is written
+ * to disk, localStorage, or the session transcript.
+ */
+class EtherNotesSidebar implements Component {
+	focused = false;
+	private readonly tui: TUI;
+	private readonly getTheme: () => ThemeLike;
+	private readonly nav: RailNav;
+	private readonly editor: Editor;
+	private editorTop = 1;
+	private editorHeight = 0;
+
+	constructor(tui: TUI, getTheme: () => ThemeLike, nav: RailNav) {
+		this.tui = tui;
+		this.getTheme = getTheme;
+		this.nav = nav;
+		const editorTui = {
+			terminal: {
+				get rows() {
+					const rows = tui.terminal?.rows ?? 24;
+					return Math.max(10, Math.ceil(Math.max(6, rows - 6) / 0.3));
+				},
+				get columns() {
+					return tui.terminal?.columns ?? 80;
+				},
+			},
+			requestRender: () => tui.requestRender(),
+			setFocus: (component: Component | null) => {
+				(tui as unknown as { setFocus?: (target: Component | null) => void }).setFocus?.(component);
+			},
+		} as unknown as TUI;
+		this.editor = new Editor(
+			editorTui,
+			{
+				borderColor: (text) => getTheme().fg("borderMuted", text),
+				selectList: {
+					selectedPrefix: (text) => getTheme().fg("accent", text),
+					selectedText: (text) => getTheme().fg("accent", text),
+					description: (text) => getTheme().fg("dim", text),
+					scrollInfo: (text) => getTheme().fg("dim", text),
+					noMatch: (text) => getTheme().fg("dim", text),
+				},
+			},
+			{ paddingX: 0 },
+		);
+		this.editor.disableSubmit = true;
+	}
+
+	invalidate(): void {
+		this.editor.invalidate();
+	}
+
+	focusEditor(): void {
+		this.nav.enter(this);
+		this.tui.requestRender();
+	}
+
+	/** Session swap / shutdown: wipe the page, never persist it. */
+	clear(): void {
+		this.editor.setText("");
+		this.editor.invalidate();
+		try {
+			this.tui.requestRender();
+		} catch {
+			// shutdown may already have detached the renderer
+		}
+	}
+
+	private matte(theme: ThemeLike, text: string, width: number): string {
+		let out = text;
+		if (visibleWidth(out) > width) out = truncateToWidth(out, width, "");
+		if (visibleWidth(out) < width) out += " ".repeat(width - visibleWidth(out));
+		return theme.bg("toolPendingBg", out);
+	}
+
+	render(width: number): string[] {
+		if (width <= 0) return [];
+		const theme = this.getTheme();
+		const rows = Math.max(1, this.tui.terminal?.rows ?? 24);
+		const fillWidth = Math.max(0, width - 1);
+		const label = ` ${theme.fg("toolTitle", "✎")} ${theme.fg(this.focused ? "toolTitle" : "muted", "NOTES")}`;
+		const hint = theme.fg("dim", "session only");
+		const gap = Math.max(1, fillWidth - visibleWidth(label) - visibleWidth(hint) - 1);
+		const lines: string[] = [label + " ".repeat(gap) + hint + " "];
+
+		this.editor.focused = this.focused;
+		const contentWidth = Math.max(10, fillWidth - 2);
+		const editorLines = this.editor.render(contentWidth);
+		this.editorTop = lines.length;
+		this.editorHeight = editorLines.length;
+		for (const line of editorLines) lines.push(` ${line}`);
+
+		const status = ` ${theme.fg("dim", "esc back · not saved")}`;
+		while (lines.length < rows - 1) lines.push("");
+		if (lines.length > rows - 1) lines.length = rows - 1;
+		lines.push(status);
+
+		const edge = theme.bg("toolPendingBg", theme.fg("borderMuted", "│"));
+		return lines.slice(0, rows).map((line) => edge + this.matte(theme, line, fillWidth));
+	}
+
+	handleInput(data: string): void {
+		if (matchesKey(data, "tab")) {
+			this.nav.cycle(1);
+			return;
+		}
+		if (matchesKey(data, "shift+tab")) {
+			this.nav.cycle(-1);
+			return;
+		}
+		if (matchesKey(data, "escape")) {
+			this.nav.leave();
+			return;
+		}
+		this.editor.focused = this.focused;
+		this.editor.handleInput(data);
+	}
+
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (event.type === "wheel") {
+			this.nav.enter(this);
+			this.editor.focused = true;
+			this.editor.handleMouse({ ...event, x: Math.max(0, event.x - 2), y: Math.max(0, event.y - 1) });
+			this.tui.requestRender();
+			return { handled: true };
+		}
+		if (event.button !== "left") return undefined;
+		this.nav.enter(this);
+		if (event.y >= this.editorTop && event.y < this.editorTop + this.editorHeight) {
+			this.editor.handleMouse({ ...event, x: Math.max(0, event.x - 2), y: event.y - this.editorTop });
+		}
+		this.tui.requestRender();
+		return { handled: true };
+	}
+}
+
 /* ------------------------------------------------------------------ install */
 
 /** Minimal shapes for the provider-neutral stream the side chat consumes. */
@@ -3522,19 +4652,99 @@ interface ChatStreamLike extends AsyncIterable<ChatStreamEventLike> {
 interface LiveChrome {
 	tui?: TUI;
 	ctx?: ExtensionContextLike;
+	/** Last known-good working directory, so rails can render during a session swap. */
+	lastCwd?: string;
 	theme?: ThemeLike;
 	ticker?: ReturnType<typeof setInterval>;
 	sidebarsCollapsed?: boolean;
 	chatCollapsed?: boolean;
 	githubCollapsed?: boolean;
+	/** QA and chat share the right-side slot; at most one is open at a time. */
+	qaOpen?: boolean;
+	/** Notes and GitHub share the rightmost slot. */
+	notesOpen?: boolean;
 	activeFile?: string | null;
 	chatModel?: ChatModelRef | null;
 	chatSidebar?: { syncVisibility(): void };
 	githubSidebar?: { tick(): void };
+	qaSidebar?: { tick(): void; dispose(): void };
+	notesSidebar?: { focusEditor(): void; clear(): void };
 	railNav?: RailNav;
 	focusRail?: (kind: RailKind) => void;
 	toggleLayout?: () => void;
+	toggleFiles?: () => void;
+	toggleQa?: () => void;
+	toggleNotes?: () => void;
+	detachChrome?: () => void;
 }
+
+/**
+ * A session replacement or reload invalidates the captured ctx: from then on every
+ * getter on it throws (ExtensionRunner.assertActive). The renderer keeps drawing the
+ * old components until the replacement runtime remounts its own chrome, so a rail
+ * touching ctx during that window would otherwise crash pi.
+ */
+function isActiveCtx(ctx: ExtensionContextLike | undefined): ctx is ExtensionContextLike {
+	if (!ctx) return false;
+	try {
+		void ctx.cwd; // any getter runs the active check
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** Adopt a ctx from a lifecycle handler, remembering plain data for the swap window. */
+function rememberCtx(live: LiveChrome, ctx: ExtensionContextLike | undefined): void {
+	if (!isActiveCtx(ctx)) {
+		// A late event from a replaced runtime must not clear or replace the new ctx.
+		if (live.ctx === ctx) live.ctx = undefined;
+		return;
+	}
+	live.ctx = ctx;
+	try {
+		if (ctx.cwd) live.lastCwd = ctx.cwd;
+	} catch {
+		// keep the previous cwd
+	}
+}
+
+/** Render-time ctx: probe once, then drop it. Rendering is synchronous, so an active
+ * ctx cannot be invalidated mid-frame. */
+function activeCtx(live: LiveChrome): ExtensionContextLike | undefined {
+	const ctx = live.ctx;
+	if (!isActiveCtx(ctx)) {
+		live.ctx = undefined;
+		return undefined;
+	}
+	return ctx;
+}
+
+/** Working directory for the rails: the live session first, the last known one second. */
+function liveCwd(live: LiveChrome): string {
+	try {
+		const cwd = activeCtx(live)?.cwd;
+		if (cwd) return cwd;
+	} catch {
+		// fall through to the remembered cwd
+	}
+	return live.lastCwd ?? process.cwd();
+}
+
+/** Files tree visibility: a manual choice wins, otherwise the width rule applies. */
+function filesTreeShown(state: FilesState | undefined, width: number): boolean {
+	return state === "open" || (state !== "closed" && width >= FILES_MIN_TERMINAL);
+}
+
+/** The left slot holds one rail; an actually-visible preview displaces the Files tree. */
+function filesRailShown(state: FilesState | undefined, width: number, activeFile: string | null): boolean {
+	const previewShown = !!activeFile && width >= PREVIEW_MIN_TERMINAL;
+	return filesTreeShown(state, width) && !previewShown;
+}
+
+/** Cross-runtime handoff: a remounted renderer asks the active chrome to wrap its root. */
+const CHROME_ATTACH = Symbol.for("ether.harness.chromeAttach");
+type ChromeAttach = (target: Component, base: Component) => Component;
 
 /** A model chosen for the side chat. Providers are resolved at call time. */
 interface ChatModelRef {
@@ -3551,15 +4761,15 @@ function installChrome(live: LiveChrome): void {
 		__etherChromeOwner?: unknown;
 		__etherBaseRoot?: Component;
 	};
-	// Take the prototype method so a previous install's instance patch is bypassed.
-	const proto = Object.getPrototypeOf(t) as { setLayoutRoot?: (c: Component | undefined) => void } | null;
+	// Fullscreen renders through a layout root; regular mode has no such hook.
+	const proto = Object.getPrototypeOf(t) as
+		| { setLayoutRoot?: (c: Component | undefined) => void; __etherAttachPatched?: boolean }
+		| null;
 	if (typeof proto?.setLayoutRoot !== "function") return; // regular mode renderer
 	// Reinstall whenever a new extension runtime drives the same renderer (/reload).
 	// A version number is not enough: the old components keep a stale, invalidated ctx.
 	if (t.__etherChromeOwner === live) return;
 	if (live.githubCollapsed === undefined) live.githubCollapsed = true;
-
-	const original = proto.setLayoutRoot.bind(t);
 	// Older versions wrapped as HStack([rail, appRoot]); adopt the inner root instead of nesting.
 	const unwrap = (candidate: Component | undefined): Component | undefined => {
 		const stack = candidate as unknown as { entries?: { component: Component }[] } | undefined;
@@ -3579,12 +4789,13 @@ function installChrome(live: LiveChrome): void {
 
 	const getTheme = (): ThemeLike => {
 		try {
-			return live.ctx?.ui?.theme ?? live.theme!;
+			return activeCtx(live)?.ui?.theme ?? live.theme!;
 		} catch {
 			return live.theme!;
 		}
 	};
-	const getCtx = () => live.ctx;
+	const getCtx = () => activeCtx(live);
+	const getCwd = () => liveCwd(live);
 
 	const getActiveFile = () => live.activeFile ?? null;
 	const setActiveFile = (file: string | null): void => {
@@ -3597,6 +4808,8 @@ function installChrome(live: LiveChrome): void {
 	let taskbarSidebar: EtherSidebar | null = null;
 	let filesSidebar: EtherFilesSidebar | null = null;
 	let chatSidebar: EtherChatSidebar | null = null;
+	let qaSidebar: EtherQaSidebar | null = null;
+	let notesSidebar: EtherNotesSidebar | null = null;
 	let previewSidebar: EtherPreviewSidebar | null = null;
 	let githubSidebar: EtherGithubSidebar | null = null;
 	let editorFocus: Component | null = null;
@@ -3606,6 +4819,8 @@ function installChrome(live: LiveChrome): void {
 		(component === taskbarSidebar ||
 			component === filesSidebar ||
 			component === chatSidebar ||
+			component === qaSidebar ||
+			component === notesSidebar ||
 			component === previewSidebar ||
 			component === githubSidebar);
 
@@ -3620,13 +4835,12 @@ function installChrome(live: LiveChrome): void {
 		const width = tui.terminal?.columns ?? 0;
 		if (rail === taskbarSidebar) return true;
 		if (live.sidebarsCollapsed) return false;
-		if (rail === chatSidebar) return !live.chatCollapsed && width >= CHAT_MIN_TERMINAL;
-		if (rail === githubSidebar) return !live.githubCollapsed && width >= GITHUB_MIN_TERMINAL;
+		if (rail === qaSidebar) return !!live.qaOpen && width >= QA_MIN_TERMINAL;
+		if (rail === chatSidebar) return !live.qaOpen && !live.chatCollapsed && width >= CHAT_MIN_TERMINAL;
+		if (rail === notesSidebar) return !!live.notesOpen && width >= NOTES_MIN_TERMINAL;
+		if (rail === githubSidebar) return !live.notesOpen && !live.githubCollapsed && width >= GITHUB_MIN_TERMINAL;
 		if (rail === previewSidebar) return !!live.activeFile && width >= PREVIEW_MIN_TERMINAL;
-		if (rail === filesSidebar) {
-			const previewVisible = !!live.activeFile && width >= PREVIEW_MIN_TERMINAL;
-			return width >= FILES_MIN_TERMINAL && !previewVisible;
-		}
+		if (rail === filesSidebar) return filesRailShown(live.filesState, width, live.activeFile ?? null);
 		return false;
 	};
 
@@ -3635,7 +4849,9 @@ function installChrome(live: LiveChrome): void {
 		if (taskbarSidebar) order.push(taskbarSidebar);
 		if (previewSidebar && railVisible(previewSidebar)) order.push(previewSidebar);
 		if (filesSidebar && railVisible(filesSidebar)) order.push(filesSidebar);
+		if (qaSidebar && railVisible(qaSidebar)) order.push(qaSidebar);
 		if (chatSidebar && railVisible(chatSidebar)) order.push(chatSidebar);
+		if (notesSidebar && railVisible(notesSidebar)) order.push(notesSidebar);
 		if (githubSidebar && railVisible(githubSidebar)) order.push(githubSidebar);
 		return order;
 	};
@@ -3678,7 +4894,7 @@ function installChrome(live: LiveChrome): void {
 
 	const notify = (message: string): void => {
 		try {
-			live.ctx?.ui?.notify?.(message, "info");
+			activeCtx(live)?.ui?.notify?.(message, "info");
 		} catch {
 			// a notification is a hint, not a dependency
 		}
@@ -3713,7 +4929,8 @@ function installChrome(live: LiveChrome): void {
 	const toggleChat = (): void => {
 		const focused = focusedComponent();
 		const width = tui.terminal?.columns ?? 0;
-		const chatVisible = !live.sidebarsCollapsed && !live.chatCollapsed && width >= CHAT_MIN_TERMINAL;
+		const chatVisible =
+			!live.qaOpen && !live.sidebarsCollapsed && !live.chatCollapsed && width >= CHAT_MIN_TERMINAL;
 		if (chatVisible) {
 			live.chatCollapsed = true;
 		} else {
@@ -3721,6 +4938,7 @@ function installChrome(live: LiveChrome): void {
 				notify(`chat needs at least ${CHAT_MIN_TERMINAL} columns`);
 				return;
 			}
+			live.qaOpen = false;
 			live.chatCollapsed = false;
 			// AI brings the chat back even when all rails were hidden with ◫.
 			live.sidebarsCollapsed = false;
@@ -3730,11 +4948,66 @@ function installChrome(live: LiveChrome): void {
 		tui.requestRender();
 	};
 
+	/**
+	 * Toggle the QA rail. It shares the side-chat slot, so opening QA collapses chat;
+	 * opening chat closes QA. GitHub remains independent. A running QA task keeps
+	 * running while the rail is collapsed.
+	 */
+	const toggleQa = (): void => {
+		const focused = focusedComponent();
+		const width = tui.terminal?.columns ?? 0;
+		const visible = !live.sidebarsCollapsed && !!live.qaOpen && width >= QA_MIN_TERMINAL;
+		let opened = false;
+		if (visible) {
+			live.qaOpen = false;
+		} else {
+			if (width < QA_MIN_TERMINAL) {
+				notify(`QA needs at least ${QA_MIN_TERMINAL} columns`);
+				return;
+			}
+			live.qaOpen = true;
+			live.chatCollapsed = true;
+			live.sidebarsCollapsed = false;
+			opened = true;
+		}
+		if (baseRoot) t.setLayoutRoot(baseRoot);
+		if (focused && isRail(focused) && !railVisible(focused)) nav.leave();
+		if (opened) qaSidebar?.focusForInput();
+		tui.requestRender();
+	};
+	live.toggleQa = toggleQa;
+
+	/**
+	 * Toggle only the Files tree. The icon is a manual override: it opens the tree
+	 * below FILES_MIN_TERMINAL and closes it above the cutoff. The choice is state,
+	 * never a resize side effect, so nothing else resets it.
+	 */
+	const toggleFiles = (): void => {
+		const focused = focusedComponent();
+		const width = tui.terminal?.columns ?? 0;
+		const visible = !live.sidebarsCollapsed && filesRailShown(live.filesState, width, live.activeFile ?? null);
+		if (visible) {
+			live.filesState = "closed";
+		} else {
+			if (!!live.activeFile && width >= PREVIEW_MIN_TERMINAL) {
+				notify("Files is hidden while the preview is open — esc closes it");
+				return;
+			}
+			live.filesState = "open";
+			// Like ✦ and ⑂, the Files icon brings the rails back even after ◫.
+			live.sidebarsCollapsed = false;
+		}
+		if (baseRoot) t.setLayoutRoot(baseRoot);
+		if (focused && isRail(focused) && !railVisible(focused)) nav.leave();
+		tui.requestRender();
+	};
+	live.toggleFiles = toggleFiles;
+
 	/** Toggle only the GitHub rail. Independent of the side chat, so both can be open. */
 	const toggleGithub = (): void => {
 		const focused = focusedComponent();
 		const width = tui.terminal?.columns ?? 0;
-		const visible = !live.sidebarsCollapsed && !live.githubCollapsed && width >= GITHUB_MIN_TERMINAL;
+		const visible = !live.sidebarsCollapsed && !live.notesOpen && !live.githubCollapsed && width >= GITHUB_MIN_TERMINAL;
 		if (visible) {
 			live.githubCollapsed = true;
 		} else {
@@ -3742,6 +5015,7 @@ function installChrome(live: LiveChrome): void {
 				notify(`github needs at least ${GITHUB_MIN_TERMINAL} columns`);
 				return;
 			}
+			live.notesOpen = false;
 			live.githubCollapsed = false;
 			live.sidebarsCollapsed = false;
 		}
@@ -3751,13 +5025,51 @@ function installChrome(live: LiveChrome): void {
 		tui.requestRender();
 	};
 
+	/** Notes shares the GitHub slot; opening one closes the other. */
+	const toggleNotes = (): void => {
+		const focused = focusedComponent();
+		const width = tui.terminal?.columns ?? 0;
+		const visible = !live.sidebarsCollapsed && !!live.notesOpen && width >= NOTES_MIN_TERMINAL;
+		let opened = false;
+		if (visible) {
+			live.notesOpen = false;
+		} else {
+			if (width < NOTES_MIN_TERMINAL) {
+				notify(`notes needs at least ${NOTES_MIN_TERMINAL} columns`);
+				return;
+			}
+			live.notesOpen = true;
+			live.githubCollapsed = true;
+			live.sidebarsCollapsed = false;
+			opened = true;
+		}
+		if (baseRoot) t.setLayoutRoot(baseRoot);
+		if (focused && isRail(focused) && !railVisible(focused)) nav.leave();
+		if (opened) notesSidebar?.focusEditor();
+		tui.requestRender();
+	};
+	live.toggleNotes = toggleNotes;
+
 	const handleTaskbarAction = (action: TaskbarAction): void => {
 		if (action === "chat") toggleChat();
 		else if (action === "github") toggleGithub();
+		else if (action === "files") toggleFiles();
+		else if (action === "qa") toggleQa();
+		else if (action === "notes") toggleNotes();
 		else toggleLayout();
 	};
 	const handleInertIcon = (item: TaskbarIcon): void => {
 		notify(`${item.label} is not wired yet`);
+	};
+	/** Taskbar tint: an open rail makes its icon blue; a closed one stays muted. */
+	const actionActive = (action: TaskbarAction): boolean => {
+		if (action === "layout") return !live.sidebarsCollapsed;
+		if (action === "files") return railVisible(filesSidebar);
+		if (action === "qa") return railVisible(qaSidebar);
+		if (action === "chat") return !live.qaOpen && railVisible(chatSidebar);
+		if (action === "notes") return railVisible(notesSidebar);
+		if (action === "github") return !live.notesOpen && railVisible(githubSidebar);
+		return false;
 	};
 
 	const focusRailByName = (kind: RailKind): void => {
@@ -3778,22 +5090,69 @@ function installChrome(live: LiveChrome): void {
 			notify(`github needs at least ${GITHUB_MIN_TERMINAL} columns`);
 			return;
 		}
-		if (kind === "files" && width < FILES_MIN_TERMINAL) {
-			notify(`Files needs at least ${FILES_MIN_TERMINAL} columns`);
+		if (kind === "qa" && width < QA_MIN_TERMINAL) {
+			notify(`QA needs at least ${QA_MIN_TERMINAL} columns`);
 			return;
+		}
+		if (kind === "notes" && width < NOTES_MIN_TERMINAL) {
+			notify(`notes needs at least ${NOTES_MIN_TERMINAL} columns`);
+			return;
+		}
+		// alt+2 reopens a manually closed tree once the width rule allows it.
+		let filesReopened = false;
+		if (kind === "files" && !filesTreeShown(live.filesState, width)) {
+			if (live.filesState === "closed" && width >= FILES_MIN_TERMINAL) {
+				live.filesState = "auto";
+				filesReopened = true;
+			} else {
+				notify(`Files needs at least ${FILES_MIN_TERMINAL} columns`);
+				return;
+			}
 		}
 		if (kind === "preview" && width < PREVIEW_MIN_TERMINAL) {
 			notify(`preview needs at least ${PREVIEW_MIN_TERMINAL} columns`);
 			return;
 		}
-		let changed = false;
-		if (kind === "chat" && live.chatCollapsed) {
-			live.chatCollapsed = false;
-			changed = true;
+		let changed = filesReopened;
+		if (kind === "chat") {
+			if (live.qaOpen) {
+				live.qaOpen = false;
+				changed = true;
+			}
+			if (live.chatCollapsed) {
+				live.chatCollapsed = false;
+				changed = true;
+			}
 		}
-		if (kind === "github" && live.githubCollapsed) {
-			live.githubCollapsed = false;
-			changed = true;
+		if (kind === "qa") {
+			if (!live.qaOpen) {
+				live.qaOpen = true;
+				changed = true;
+			}
+			if (!live.chatCollapsed) {
+				live.chatCollapsed = true;
+				changed = true;
+			}
+		}
+		if (kind === "github") {
+			if (live.notesOpen) {
+				live.notesOpen = false;
+				changed = true;
+			}
+			if (live.githubCollapsed) {
+				live.githubCollapsed = false;
+				changed = true;
+			}
+		}
+		if (kind === "notes") {
+			if (!live.notesOpen) {
+				live.notesOpen = true;
+				changed = true;
+			}
+			if (!live.githubCollapsed) {
+				live.githubCollapsed = true;
+				changed = true;
+			}
 		}
 		if (kind !== "taskbar" && live.sidebarsCollapsed) {
 			live.sidebarsCollapsed = false;
@@ -3807,9 +5166,13 @@ function installChrome(live: LiveChrome): void {
 					? filesSidebar
 					: kind === "preview"
 						? previewSidebar
-						: kind === "chat"
-							? chatSidebar
-							: githubSidebar;
+						: kind === "qa"
+							? qaSidebar
+							: kind === "notes"
+								? notesSidebar
+								: kind === "chat"
+								? chatSidebar
+								: githubSidebar;
 		if (!target || !railVisible(target)) {
 			notify(`${kind}: rail is not available`);
 			return;
@@ -3819,27 +5182,49 @@ function installChrome(live: LiveChrome): void {
 	live.focusRail = focusRailByName;
 
 	// Created once per install so tree expansion and scroll survive layout toggles.
-	filesSidebar = new EtherFilesSidebar(tui, getCtx, getTheme, getActiveFile, openFile, nav);
+	filesSidebar = new EtherFilesSidebar(tui, getCwd, getTheme, getActiveFile, openFile, nav);
 	chatSidebar = new EtherChatSidebar(
 		tui,
 		getTheme,
-		() => live.ctx,
+		getCtx,
 		() => live.chatModel ?? null,
-		() => !live.sidebarsCollapsed && !live.chatCollapsed && (tui.terminal?.columns ?? 0) >= CHAT_MIN_TERMINAL,
+		() =>
+			!live.qaOpen &&
+			!live.sidebarsCollapsed &&
+			!live.chatCollapsed &&
+			(tui.terminal?.columns ?? 0) >= CHAT_MIN_TERMINAL,
 		nav,
 	);
 	live.chatSidebar = chatSidebar;
+	qaSidebar = new EtherQaSidebar(
+		tui,
+		getTheme,
+		() => {
+			const ctx = activeCtx(live);
+			const model = ctx?.model;
+			return model?.provider && model?.id ? `${model.provider}/${model.id}` : undefined;
+		},
+		() => activeCtx(live)?.thinkingLevel,
+		nav,
+	);
+	live.qaSidebar = qaSidebar;
+	notesSidebar = new EtherNotesSidebar(tui, getTheme, nav);
+	live.notesSidebar = notesSidebar;
 	githubSidebar = new EtherGithubSidebar(
 		tui,
 		getTheme,
 		nav,
-		() => !live.sidebarsCollapsed && !live.githubCollapsed && (tui.terminal?.columns ?? 0) >= GITHUB_MIN_TERMINAL,
+		() =>
+			!live.sidebarsCollapsed &&
+			!live.notesOpen &&
+			!live.githubCollapsed &&
+			(tui.terminal?.columns ?? 0) >= GITHUB_MIN_TERMINAL,
 	);
 	live.githubSidebar = githubSidebar;
 	previewSidebar = new EtherPreviewSidebar(
 		tui,
 		getTheme,
-		getCtx,
+		getCwd,
 		getActiveFile,
 		(viaKeyboard: boolean) => {
 			const hadFocus = previewSidebar?.focused === true;
@@ -3853,7 +5238,16 @@ function installChrome(live: LiveChrome): void {
 		},
 		nav,
 	);
-	taskbarSidebar = new EtherSidebar(tui, getTheme, "left", nav, true, handleTaskbarAction, handleInertIcon);
+	taskbarSidebar = new EtherSidebar(
+		tui,
+		getTheme,
+		"left",
+		nav,
+		true,
+		handleTaskbarAction,
+		handleInertIcon,
+		actionActive,
+	);
 
 	const wrap = (root: Component): Component => {
 		const chatColumn = new VStack([
@@ -3867,10 +5261,8 @@ function installChrome(live: LiveChrome): void {
 			grow: 0,
 			shrink: 0,
 			minSize: 0,
-			visible: (viewport: { width: number }) => {
-				const previewVisible = !!live.activeFile && viewport.width >= PREVIEW_MIN_TERMINAL;
-				return viewport.width >= FILES_MIN_TERMINAL && !previewVisible;
-			},
+			visible: (viewport: { width: number }) =>
+				filesRailShown(live.filesState, viewport.width, live.activeFile ?? null),
 		};
 		const chatRail = {
 			// RightsidebarA (RightSidebarA): fixed 40-col side chat, 36 while the preview is open.
@@ -3880,7 +5272,25 @@ function installChrome(live: LiveChrome): void {
 			shrink: 0,
 			minSize: 0,
 			visible: (viewport: { width: number }) =>
-				!live.chatCollapsed && viewport.width >= CHAT_MIN_TERMINAL,
+				!live.qaOpen && !live.chatCollapsed && viewport.width >= CHAT_MIN_TERMINAL,
+		};
+		const qaRail = {
+			// RightSidebarQ: QA shares the chat slot; chat and QA take turns.
+			component: qaSidebar!,
+			basis: QA_SIDEBAR_WIDTH,
+			grow: 0,
+			shrink: 0,
+			minSize: 0,
+			visible: (viewport: { width: number }) => !!live.qaOpen && viewport.width >= QA_MIN_TERMINAL,
+		};
+		const notesRail = {
+			// RightSidebarN: session-only notes, sharing the GitHub slot.
+			component: notesSidebar!,
+			basis: NOTES_SIDEBAR_WIDTH,
+			grow: 0,
+			shrink: 0,
+			minSize: 0,
+			visible: (viewport: { width: number }) => !!live.notesOpen && viewport.width >= NOTES_MIN_TERMINAL,
 		};
 		const previewRail = {
 			// RightsidebarB: file preview, now in the left slot where Files lives.
@@ -3898,12 +5308,15 @@ function installChrome(live: LiveChrome): void {
 			grow: 0,
 			shrink: 0,
 			minSize: 0,
-			visible: (viewport: { width: number }) => !live.githubCollapsed && viewport.width >= GITHUB_MIN_TERMINAL,
+			visible: (viewport: { width: number }) =>
+				!live.notesOpen && !live.githubCollapsed && viewport.width >= GITHUB_MIN_TERMINAL,
 		};
 		// Side rails toggle with ◫; LeftSidebarA always survives. The AI icon toggles chat alone.
 		const showRails = !live.sidebarsCollapsed;
-		const showChat = showRails && !live.chatCollapsed;
-		const showGithub = showRails && !live.githubCollapsed;
+		const showChat = showRails && !live.chatCollapsed && !live.qaOpen;
+		const showQa = showRails && !!live.qaOpen;
+		const showNotes = showRails && !!live.notesOpen;
+		const showGithub = showRails && !live.githubCollapsed && !live.notesOpen;
 		return new HStack([
 			{
 				// LeftSidebarA: far-left taskbar, always visible even when the other rails hide.
@@ -3918,13 +5331,44 @@ function installChrome(live: LiveChrome): void {
 			...(showRails ? [filesRail] : []),
 			{ component: chatColumn, basis: 0, grow: 1, shrink: 1, minSize: 1 },
 			...(showChat ? [chatRail] : []),
+			...(showQa ? [qaRail] : []),
+			...(showNotes ? [notesRail] : []),
 			...(showGithub ? [githubRail] : []),
 		]);
 	};
 
-	t.setLayoutRoot = (root) => {
-		if (root) t.__etherBaseRoot = root;
-		original(root ? wrap(root) : undefined);
+	// Pi mounts a new renderer when the TUI mode changes and calls setLayoutRoot on it.
+	// Patch the shared prototype once so the chrome reattaches to that renderer with the
+	// same rail instances and state; otherwise the chrome vanishes until pi restarts.
+	const attachChrome: ChromeAttach = (target, base) => {
+		const layoutTarget = target as typeof t;
+		layoutTarget.__etherBaseRoot = base;
+		layoutTarget.__etherChromeOwner = live;
+		return wrap(base);
+	};
+	const layoutProto = proto as typeof proto & {
+		setLayoutRoot: (component: Component | undefined) => void;
+	};
+	if (!layoutProto.__etherAttachPatched) {
+		const originalProto = layoutProto.setLayoutRoot;
+		Object.defineProperty(layoutProto, "__etherAttachPatched", { value: true, configurable: true });
+		layoutProto.setLayoutRoot = function (this: Component, root?: Component): void {
+			if (!root) return originalProto.call(this, root);
+			const attach = (globalThis as Record<symbol, unknown>)[CHROME_ATTACH] as ChromeAttach | undefined;
+			if (!attach) return originalProto.call(this, root);
+			try {
+				return originalProto.call(this, attach(this, root));
+			} catch {
+				// Chrome trouble must never stop the renderer from mounting its own root.
+				return originalProto.call(this, root);
+			}
+		};
+	}
+	(globalThis as Record<symbol, unknown>)[CHROME_ATTACH] = attachChrome;
+	live.detachChrome = () => {
+		if ((globalThis as Record<symbol, unknown>)[CHROME_ATTACH] === attachChrome) {
+			delete (globalThis as Record<symbol, unknown>)[CHROME_ATTACH];
+		}
 	};
 	if (baseRoot) t.setLayoutRoot(baseRoot);
 }
@@ -4172,6 +5616,9 @@ export default function etherChrome(pi: ExtensionAPI): void {
 		bind(Key.alt("3"), "Focus the file preview", () => live.focusRail?.("preview"));
 		bind(Key.alt("4"), "Focus the side chat", () => live.focusRail?.("chat"));
 		bind(Key.alt("5"), "Focus the GitHub rail", () => live.focusRail?.("github"));
+		bind(Key.alt("6"), "Toggle the Files rail", () => live.toggleFiles?.());
+		bind(Key.alt("7"), "Toggle the QA rail", () => live.toggleQa?.());
+		bind(Key.alt("8"), "Toggle the Notes rail", () => live.toggleNotes?.());
 		bind(Key.alt("l"), "Toggle the side rails", () => live.toggleLayout?.());
 	}
 
@@ -4223,7 +5670,7 @@ export default function etherChrome(pi: ExtensionAPI): void {
 
 	pi.on("session_start", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
-		live.ctx = ctx as unknown as ExtensionContextLike;
+		rememberCtx(live, ctx as unknown as ExtensionContextLike);
 		live.chatModel = readChatConfig();
 		startedAt = Date.now();
 		statsCache = undefined;
@@ -4241,7 +5688,7 @@ export default function etherChrome(pi: ExtensionAPI): void {
 				() => live.ctx,
 				() => {
 					try {
-						return live.ctx?.ui?.theme ?? theme;
+						return activeCtx(live)?.ui?.theme ?? theme;
 					} catch {
 						return theme;
 					}
@@ -4250,12 +5697,14 @@ export default function etherChrome(pi: ExtensionAPI): void {
 					const width = tui.terminal?.columns ?? 0;
 					const shown = !live.sidebarsCollapsed;
 					const previewVisible = !!live.activeFile && width >= PREVIEW_MIN_TERMINAL;
+					const filesVisible = filesRailShown(live.filesState, width, live.activeFile ?? null);
 					return {
-						left: shown && (previewVisible || width >= FILES_MIN_TERMINAL),
+						left: shown && (previewVisible || filesVisible),
 						right:
 							shown &&
 							((!live.chatCollapsed && width >= CHAT_MIN_TERMINAL) ||
-								(!live.githubCollapsed && width >= GITHUB_MIN_TERMINAL)),
+								(live.notesOpen && width >= NOTES_MIN_TERMINAL) ||
+								(!live.notesOpen && !live.githubCollapsed && width >= GITHUB_MIN_TERMINAL)),
 					};
 				},
 				footerData,
@@ -4267,6 +5716,7 @@ export default function etherChrome(pi: ExtensionAPI): void {
 			live.ticker = setInterval(() => {
 				tick += 1;
 				live.chatSidebar?.syncVisibility();
+				live.qaSidebar?.tick();
 				live.githubSidebar?.tick();
 				live.railNav?.ensureFocusVisible();
 				live.tui?.requestRender();
@@ -4276,7 +5726,7 @@ export default function etherChrome(pi: ExtensionAPI): void {
 
 	// Keep the header honest: refresh whenever the values it shows can change.
 	const refresh = (_event: unknown, ctx: unknown) => {
-		live.ctx = ctx as ExtensionContextLike;
+		rememberCtx(live, ctx as ExtensionContextLike);
 		live.tui?.requestRender();
 	};
 	const anyPi = pi as unknown as { on(event: string, handler: (event: unknown, ctx: unknown) => void): void };
@@ -4298,10 +5748,17 @@ export default function etherChrome(pi: ExtensionAPI): void {
 	anyPi.on("session_shutdown", () => {
 		if (live.ticker) clearInterval(live.ticker);
 		live.ticker = undefined;
+		live.qaSidebar?.dispose();
+		live.notesSidebar?.clear();
+		live.detachChrome?.();
 		try {
 			live.ctx?.ui?.setFooter?.(undefined);
 		} catch {
 			// ignore
 		}
+		// The context is invalidated right after this event; drop it so the next
+		// frame of the old chrome renders from lastCwd instead of throwing.
+		live.ctx = undefined;
+		live.tui = undefined;
 	});
 }

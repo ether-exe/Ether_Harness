@@ -151,7 +151,7 @@ try {
 	const rawFrame = renderLayoutFrame(tui.layoutRoot, 140, 40).lines.join(String.fromCharCode(10));
 	const rawLines = renderLayoutFrame(tui.layoutRoot, 140, 40).lines;
 	const escSeq = String.fromCharCode(27);
-	check(rawFrame.includes(`${escSeq}[48;2;36;90;156m`), "user bubble uses the theme-blue hue");
+	check(rawFrame.includes(theme.getBgAnsi("userMessageBg")), "user bubble uses userMessageBg");
 	check(rawFrame.includes(`${escSeq}[48;2;4;4;5m`), "Ether bubble uses the dark matte fill");
 	check(!rawFrame.includes(theme.getBgAnsi("customMessageBg")), "Ether bubble no longer uses customMessageBg");
 	const replyLine = rawLines.find((line) => line.includes("Hello there"));

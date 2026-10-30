@@ -124,7 +124,7 @@ try {
 	const preview = findByName(tui.layoutRoot, "EtherPreviewSidebar");
 	check(!!chat && !!files && !!taskbar, "chat, Files, and taskbar are mounted");
 	check(preview === null, "preview is not mounted until a file is open");
-	check(shortcuts.has("alt+1") && shortcuts.has("alt+2") && shortcuts.has("alt+3") && shortcuts.has("alt+4") && shortcuts.has("alt+l"), "global shortcuts registered");
+	check(shortcuts.has("alt+1") && shortcuts.has("alt+2") && shortcuts.has("alt+3") && shortcuts.has("alt+4") && shortcuts.has("alt+6") && shortcuts.has("alt+l"), "global shortcuts registered");
 
 	// alt+4 focuses the chat, and the composer switches to the focused frame.
 	fire("alt+4");
@@ -136,11 +136,9 @@ try {
 	chat.handleInput("\t");
 	check(tui.focusedComponent === taskbar, "tab from chat wraps to the taskbar");
 	taskbar.handleInput("\x1b[B");
-	check(taskbar.selectedIcon === "⬡", "down moves the taskbar selection to the next icon");
+	check(taskbar.selectedIcon === "✦", "down moves the taskbar selection to the next icon");
 	raw = rawFrame();
 	check(raw.some((line) => line.includes(theme.getBgAnsi("selectedBg"))), "focused taskbar selection uses selectedBg");
-	taskbar.handleInput("\r");
-	check(notices.at(-1)?.message === "Extensions is not wired yet", "enter on an inert taskbar icon explains it is inert");
 	taskbar.selectedIcon = "⑂";
 	const githubBefore = tui.layoutRoot.entries.length;
 	taskbar.handleInput("\r");
@@ -148,9 +146,11 @@ try {
 	taskbar.handleInput("\r");
 	check(tui.layoutRoot.entries.length === githubBefore, "enter on the GitHub icon collapses the rail");
 	taskbar.handleInput("\x1b[H");
-	check(taskbar.selectedIcon === "⌂", "home selects the first taskbar icon");
+	check(taskbar.selectedIcon === "▤", "home selects the first taskbar icon");
 	taskbar.handleInput("\x1b[F");
-	check(taskbar.selectedIcon === "?", "end selects the last taskbar icon");
+	check(taskbar.selectedIcon === "⚙", "end selects the Settings placeholder");
+	taskbar.handleInput("\r");
+	check(notices.at(-1)?.message === "Settings is not wired yet", "enter on Settings explains it is a placeholder");
 	const aiExpandedEntries = tui.layoutRoot.entries.length;
 	taskbar.selectedIcon = "✦";
 	taskbar.handleInput("\r");
@@ -259,6 +259,20 @@ try {
 	fire("alt+4");
 	check(notices.at(-1)?.message.includes("85"), "alt+4 explains the 85-column chat cutoff");
 	tui.terminal.columns = 140;
+
+	// Files rail: the icon and alt+6 toggle the tree without disturbing the other rails.
+	const filesAtEnd = () =>
+		plainFrame().some((line) => line.slice(5, 29).includes("Files") || line.slice(5, 29).includes("README.md"));
+	const endTaskbar = findByName(tui.layoutRoot, "EtherSidebar");
+	endTaskbar.selectedIcon = "▤";
+	endTaskbar.handleInput("\r");
+	check(!filesAtEnd(), "enter on the Files icon collapses the tree");
+	endTaskbar.handleInput("\r");
+	check(filesAtEnd(), "enter on the Files icon restores the tree");
+	fire("alt+6");
+	check(!filesAtEnd(), "alt+6 collapses the Files rail");
+	fire("alt+6");
+	check(filesAtEnd(), "alt+6 restores the Files rail");
 } finally {
 	handlers.get("session_shutdown")?.();
 	fs.rmSync(HISTORY_DIR, { recursive: true, force: true });

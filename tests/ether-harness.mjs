@@ -112,21 +112,40 @@ try {
 		);
 	}
 
-	// LeftSidebarA prototype: top icon group, then a gap, then footer icon group.
+	// LeftSidebarA: four wired icons at the top, Settings anchored to the bottom.
 	for (const width of [140, 60]) {
 		const frame = renderLayoutFrame(tui.layoutRoot, width, 40);
 		const plain = frame.lines.map((line) => stripTerminalSequences(line));
-		const topIcons = ["⌂", "▤", "⌕", "⌁", "⎇", "◫", "⬡", "◷", "✦", "⑂"];
-		const footerIcons = ["⟳", "≡", "?"];
-		const topOk = topIcons.every((icon, index) => plain[1 + index * 2]?.[1] === icon);
-		const footerOk = footerIcons.every((icon, index) => plain[34 + index * 2]?.[1] === icon);
-		const gapOk = [16, 18, 33].every((row) => plain[row]?.[1] === " ");
-		const secondColumnEmpty = [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 34, 36, 38].every((row) => plain[row]?.[3] === " ");
+		const topIcons = ["▤", "◫", "✦", "⑂", "✓", "✎"];
+		const drawn = plain
+			.slice(1, -1)
+			.map((line, index) => ({ row: index + 1, glyph: line?.[1] ?? " " }))
+			.filter(({ glyph }) => glyph !== " ");
+		const iconsOk =
+			drawn.length === topIcons.length + 1 &&
+			topIcons.every((icon, index) => drawn[index]?.row === 1 + index * 2 && drawn[index]?.glyph === icon) &&
+			drawn.at(-1)?.row === 38 &&
+			drawn.at(-1)?.glyph === "⚙";
+		const secondColumnEmpty = [...Array(20)].every((_, index) => plain[1 + index * 2]?.[3] === " ");
 		check(
-			topOk && footerOk && gapOk && secondColumnEmpty,
-			`taskbar ${width}: top=${topOk} footer=${footerOk} gap=${gapOk} secondColumnEmpty=${secondColumnEmpty}`,
+			iconsOk && secondColumnEmpty,
+			`taskbar ${width}: six icons plus Settings=${iconsOk} secondColumnEmpty=${secondColumnEmpty}`,
 		);
 	}
+
+	// Open rails tint their icon blue; closed rails keep the muted tone.
+	const rawAt = (width) => {
+		tui.terminal.columns = width;
+		return renderLayoutFrame(tui.layoutRoot, width, 40).lines;
+	};
+	const wideIcons = rawAt(140);
+	check(wideIcons[1].includes(theme.fg("toolTitle", "▤")), "open Files icon is blue");
+	check(wideIcons[3].includes(theme.fg("toolTitle", "◫")), "expanded Layout icon is blue");
+	check(wideIcons[5].includes(theme.fg("toolTitle", "✦")), "open AI icon is blue");
+	check(wideIcons[7].includes(theme.fg("muted", "⑂")), "collapsed GitHub icon stays muted");
+	check(wideIcons[9].includes(theme.fg("muted", "✓")), "closed QA icon stays muted");
+	check(wideIcons[11].includes(theme.fg("muted", "✎")), "closed Notes icon stays muted");
+	check(wideIcons[38].includes(theme.fg("muted", "⚙")), "Settings placeholder stays muted");
 
 	// Footer HUD: four rows, full width, border markers survive narrow widths.
 	for (const width of [112, 92, 72, 60, 24, 10]) {
@@ -177,6 +196,18 @@ try {
 	fs.writeFileSync(path.join(treeRoot, "node_modules", "dep.js"), "");
 	fs.mkdirSync(path.join(treeRoot, ".git"));
 	fs.writeFileSync(path.join(treeRoot, ".git", "config"), "");
+	// Flutter/Dart web tooling drops a whole Edge profile under .dart_tool
+	// (EdgeCoupons, BudgetDatabase, Collections, discount DBs, maskable icons).
+	fs.mkdirSync(path.join(treeRoot, ".dart_tool", "chrome-device", "Default", "EdgeCoupons"), { recursive: true });
+	fs.mkdirSync(path.join(treeRoot, ".dart_tool", "chrome-device", "Default", "BudgetDatabase"));
+	fs.mkdirSync(path.join(treeRoot, ".dart_tool", "chrome-device", "Default", "Collections"));
+	fs.mkdirSync(path.join(treeRoot, ".dart_tool", "chrome-device", "Default", "discount_infos_db"));
+	fs.writeFileSync(path.join(treeRoot, ".dart_tool", "chrome-device", "Default", "EdgeCoupons", "state"), "");
+	fs.mkdirSync(path.join(treeRoot, ".idea"));
+	fs.writeFileSync(path.join(treeRoot, ".idea", "workspace.xml"), "");
+	fs.writeFileSync(path.join(treeRoot, "owniverse.iml"), "");
+	fs.writeFileSync(path.join(treeRoot, ".metadata"), "");
+	fs.writeFileSync(path.join(treeRoot, ".flutter-plugins-dependencies"), "{}");
 	const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ether-outside-"));
 	fs.writeFileSync(path.join(outsideRoot, "secret.ts"), "");
 	try {
@@ -210,6 +241,15 @@ try {
 			!treeText.includes(".pytest_cache") &&
 			!treeText.includes("node_modules") &&
 			!treeText.includes(".git") &&
+			!treeText.includes(".dart_tool") &&
+			!treeText.includes("EdgeCoupons") &&
+			!treeText.includes("BudgetDatabase") &&
+			!treeText.includes("Collections") &&
+			!treeText.includes("discount_infos_db") &&
+			!treeText.includes(".idea") &&
+			!treeText.includes("owniverse.iml") &&
+			!treeText.includes(".metadata") &&
+			!treeText.includes(".flutter-plugins-dependencies") &&
 			!treeText.includes("outside-link") &&
 			!treeText.includes("secret.ts"),
 		"file tree: generated files and links outside the workspace are excluded",
@@ -247,11 +287,11 @@ try {
 	);
 	const layoutTaskbar = tui.layoutRoot.entries?.[0]?.component;
 	const taskbarClick = (y) => ({ ...filesClick(y), x: 1, width: 5 });
-	layoutTaskbar.handleMouse?.({ ...taskbarClick(11), type: "press" });
-	layoutTaskbar.handleMouse?.(taskbarClick(11));
+	layoutTaskbar.handleMouse?.({ ...taskbarClick(3), type: "press" });
+	layoutTaskbar.handleMouse?.(taskbarClick(3));
 	const reopenedTaskbar = tui.layoutRoot.entries?.[0]?.component;
-	reopenedTaskbar.handleMouse?.({ ...taskbarClick(11), type: "press" });
-	reopenedTaskbar.handleMouse?.(taskbarClick(11));
+	reopenedTaskbar.handleMouse?.({ ...taskbarClick(3), type: "press" });
+	reopenedTaskbar.handleMouse?.(taskbarClick(3));
 	const persistedRows = renderLayoutFrame(tui.layoutRoot, 140, 40).lines.map((line) =>
 		stripTerminalSequences(line).slice(5, 29),
 	);
@@ -265,7 +305,7 @@ try {
 	fs.rmSync(treeRoot, { recursive: true, force: true });
 	fs.rmSync(outsideRoot, { recursive: true, force: true });
 
-	// Mouse action: only the layout icon is wired; other rows are inert.
+	// Mouse action: every taskbar icon is wired; empty rows are inert.
 	const clickEvent = (y) => ({
 		type: "click",
 		button: "left",
@@ -281,20 +321,33 @@ try {
 	});
 	const taskbarOf = () => tui.layoutRoot.entries?.[0]?.component;
 	const taskbar = taskbarOf();
-	const searchPress = taskbar.handleMouse?.({ ...clickEvent(5), type: "press" });
-	const searchResult = taskbar.handleMouse?.(clickEvent(5));
-	check(searchPress === undefined && searchResult === undefined, "taskbar search row: inert");
+	const filesFrame = () =>
+		renderLayoutFrame(tui.layoutRoot, 140, 40).lines.map((line) => stripTerminalSequences(line).slice(5, 29));
+	const filesRailVisible = () => filesFrame().some((line) => line.includes("Files") || line.includes("README.md"));
+	const filesPressEntries = tui.layoutRoot.entries?.length ?? 0;
+	const filesPress = taskbar.handleMouse?.({ ...clickEvent(1), type: "press" });
+	const filesResult = taskbar.handleMouse?.(clickEvent(1));
+	check(filesPress?.handled === true && filesResult?.handled === true, "taskbar Files row handles clicks");
+	check(!filesRailVisible() && (tui.layoutRoot.entries?.length ?? 0) === filesPressEntries, "Files icon collapses the tree");
+	taskbar.handleMouse?.({ ...clickEvent(1), type: "press" });
+	taskbar.handleMouse?.(clickEvent(1));
+	check(filesRailVisible() && (tui.layoutRoot.entries?.length ?? 0) === filesPressEntries, "Files icon restores the tree");
+	const emptyPress = taskbar.handleMouse?.({ ...clickEvent(13), type: "press" });
+	const emptyResult = taskbar.handleMouse?.(clickEvent(13));
+	check(emptyPress === undefined && emptyResult === undefined, "empty taskbar row has no action");
 	const entriesBeforeGithub = tui.layoutRoot.entries?.length ?? 0;
-	const githubPress = taskbar.handleMouse?.({ ...clickEvent(19), type: "press" });
-	const githubResult = taskbar.handleMouse?.(clickEvent(19));
+	const githubPress = taskbar.handleMouse?.({ ...clickEvent(7), type: "press" });
+	const githubResult = taskbar.handleMouse?.(clickEvent(7));
 	check(githubPress?.handled === true && githubResult?.handled === true, "taskbar GitHub row handles clicks");
 	check((tui.layoutRoot.entries?.length ?? 0) === entriesBeforeGithub + 1, "GitHub icon opens its rail");
-	taskbar.handleMouse?.({ ...clickEvent(19), type: "press" });
-	taskbar.handleMouse?.(clickEvent(19));
+	check(rawAt(140)[7].includes(theme.fg("toolTitle", "⑂")), "opening GitHub turns its icon blue");
+	taskbar.handleMouse?.({ ...clickEvent(7), type: "press" });
+	taskbar.handleMouse?.(clickEvent(7));
 	check((tui.layoutRoot.entries?.length ?? 0) === entriesBeforeGithub, "GitHub icon collapses its rail");
+	check(rawAt(140)[7].includes(theme.fg("muted", "⑂")), "collapsing GitHub mutes its icon");
 	const aiExpandedEntries = tui.layoutRoot.entries?.length ?? 0;
-	const aiPress = taskbar.handleMouse?.({ ...clickEvent(17), type: "press" });
-	const aiResult = taskbar.handleMouse?.(clickEvent(17));
+	const aiPress = taskbar.handleMouse?.({ ...clickEvent(5), type: "press" });
+	const aiResult = taskbar.handleMouse?.(clickEvent(5));
 	const aiCollapsedPlain = renderLayoutFrame(tui.layoutRoot, 140, 40).lines.map((line) => stripTerminalSequences(line));
 	check(aiPress?.handled === true && aiResult?.handled === true, "taskbar AI row handles clicks");
 	check(
@@ -303,17 +356,21 @@ try {
 			aiCollapsedPlain.some((line) => line.includes("Files")),
 		"AI icon collapses only the side chat",
 	);
-	taskbar.handleMouse?.({ ...clickEvent(17), type: "press" });
-	taskbar.handleMouse?.(clickEvent(17));
+	taskbar.handleMouse?.({ ...clickEvent(5), type: "press" });
+	taskbar.handleMouse?.(clickEvent(5));
 	check(
 		(tui.layoutRoot.entries?.length ?? 0) === aiExpandedEntries &&
 			renderLayoutFrame(tui.layoutRoot, 140, 40).lines.some((line) => stripTerminalSequences(line).includes("● ETHER")),
 		"AI icon restores the side chat",
 	);
-	taskbar.handleMouse?.({ ...clickEvent(11), type: "press" });
-	taskbar.handleMouse?.(clickEvent(11));
+	taskbar.handleMouse?.({ ...clickEvent(3), type: "press" });
+	taskbar.handleMouse?.(clickEvent(3));
 	let entries = tui.layoutRoot.entries ?? [];
 	check(entries.length === 2, `layout collapsed: ${entries.length} HStack entries (expected 2)`);
+	const collapsedIcons = rawAt(140);
+	check(collapsedIcons[3].includes(theme.fg("muted", "◫")), "collapsed Layout icon stays muted");
+	check(collapsedIcons[1].includes(theme.fg("muted", "▤")), "Files icon mutes while rails are collapsed");
+	check(collapsedIcons[5].includes(theme.fg("muted", "✦")), "AI icon mutes while rails are collapsed");
 	const collapsedFrame = renderLayoutFrame(tui.layoutRoot, 140, 40);
 	const collapsedTop = stripTerminalSequences(collapsedFrame.lines[0] ?? "");
 	check(collapsedTop.startsWith("    │┌") && collapsedTop.endsWith("┐"), "layout collapsed: header spans full width");
@@ -323,8 +380,8 @@ try {
 		"layout collapsed: footer switches to box corners",
 	);
 	const taskbar2 = taskbarOf();
-	taskbar2.handleMouse?.({ ...clickEvent(11), type: "press" });
-	taskbar2.handleMouse?.(clickEvent(11));
+	taskbar2.handleMouse?.({ ...clickEvent(3), type: "press" });
+	taskbar2.handleMouse?.(clickEvent(3));
 	entries = tui.layoutRoot.entries ?? [];
 	check(entries.length === 4, `layout expanded: ${entries.length} HStack entries (expected 4)`);
 

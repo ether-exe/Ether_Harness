@@ -9,3 +9,6 @@ Ether/
 Ether_Harness_Memory.md
 Tinctorius.md
 sessions/
+
+# Playwright MCP debug output
+.playwright-mcp/

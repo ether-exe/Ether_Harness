@@ -2,12 +2,12 @@
 /**
  * Ether Harness installer.
  *
- * Copies the extension, both themes, and the source font into pi's agent directory.
+ * Copies the extensions, all themes, and the source font into pi's agent directory.
  * Merges only `theme` into settings.json. Never copies auth, sessions, chat model
  * choice, or side-chat history.
  *
  * Usage:
- *   node install.mjs [--target DIR] [--theme Ether|Bluether] [--no-theme] [--dry-run]
+ *   node install.mjs [--target DIR] [--theme Ether|Bluether|ETHEREX] [--no-theme] [--dry-run]
  *   node install.mjs restore [--target DIR] [--from TIMESTAMP] [--dry-run]
  *
  * `--target` defaults to $PI_CODING_AGENT_DIR, then ~/.pi/agent.
@@ -32,9 +32,11 @@ const stamp = getArg("--from", new Date().toISOString().replace(/[:.]/g, "-"));
 
 const FILES = [
 	["extensions/ether-sidebar.ts", "extensions/ether-sidebar.ts"],
+	["qa/ether-qa-agent.ts", "qa/ether-qa-agent.ts"],
 	["extensions/web-tools.ts", "extensions/web-tools.ts"],
 	["themes/Ether.json", "themes/Ether.json"],
 	["themes/Bluether.json", "themes/Bluether.json"],
+	["themes/ETHEREX.json", "themes/ETHEREX.json"],
 	["assets/fonts/Isometra-Regular.ttf", "assets/fonts/Isometra-Regular.ttf"],
 ];
 
@@ -73,6 +75,7 @@ function install() {
 		pi: readPiVersion(),
 		theme: skipTheme ? null : themeName,
 		files: [],
+		removed: [],
 		settings: null,
 	};
 
@@ -114,6 +117,21 @@ function install() {
 			copyFileSync(source, dest);
 		}
 		log(`install ${destRelative}`);
+	}
+
+	// Older installs put the QA helper in extensions/, where pi discovered and
+	// loaded it in the main session. Move it out of discovery.
+	for (const relative of ["extensions/ether-qa-agent.ts"]) {
+		const dest = join(target, relative);
+		if (!existsSync(dest)) continue;
+		const backup = join(backupDir, relative);
+		if (!dryRun) {
+			mkdirSync(dirname(backup), { recursive: true });
+			copyFileSync(dest, backup);
+			rmSync(dest, { force: true });
+		}
+		manifest.removed.push({ path: relative, backup: relative });
+		log(`remove ${relative} (QA helper now lives under qa/)`);
 	}
 
 	if (!skipTheme) {

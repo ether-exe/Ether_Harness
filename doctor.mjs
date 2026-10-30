@@ -79,9 +79,11 @@ if (!piRoot) {
 // Harness files
 for (const relative of [
 	"extensions/ether-sidebar.ts",
+	"qa/ether-qa-agent.ts",
 	"extensions/web-tools.ts",
 	"themes/Ether.json",
 	"themes/Bluether.json",
+	"themes/ETHEREX.json",
 	"assets/fonts/Isometra-Regular.ttf",
 	"assets/fonts/OFL.txt",
 ]) {
@@ -91,7 +93,7 @@ for (const relative of [
 }
 
 // Themes
-for (const name of ["Ether", "Bluether"]) {
+for (const name of ["Ether", "Bluether", "ETHEREX"]) {
 	const theme = readJson(join(ROOT, "themes", `${name}.json`));
 	if (!theme) {
 		fail(`themes/${name}.json is not valid JSON`);

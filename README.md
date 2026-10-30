@@ -4,8 +4,9 @@ A hand-built terminal chrome for [pi](https://pi.dev).
 
 Out of the box, pi is a single scrolling transcript. Ether turns it into a cockpit: an animated
 header with live session telemetry, a taskbar rail on the far left, a file tree, an IDE-style file
-preview, an isolated side chat that never mixes with your main conversation, and a GitHub HUD fed
-by the connected `gh` CLI. Everything works with the mouse or entirely from the keyboard.
+preview, an isolated side chat that never mixes with your main conversation, a GitHub HUD fed by
+the connected `gh` CLI, and a browser QA persona. Everything works with the mouse or entirely from
+the keyboard.
 
 This started as my personal setup and is shared as a working reference, not a polished product. If
 you want pi to look and behave differently, the tricks in here — wrapping the layout root, the theme
@@ -13,16 +14,15 @@ tokens, the test harness — should transfer easily to your own chrome.
 
 ```
 ┌──┬──────────────────────────────┬───────────────────────────┬────────────────┐
-│⌂ │  ▄▄▄▄ ▄▄▄ ▄▄   ETHER         │ deepseek · context · $0.05│ Chat           │
-│▤ │  header · 3 rows of wordmark │ ▰▰▰▰▰▰▰▰▱▱ 62%           │ ╭────────────╮ │
-│⌕ │                              │ working · session · cwd   │ │ you        │ │
-│⌁ ├──────────────┬───────────────┴───────────────────────────┤ ╰────────────╯ │
-│⎇ │ Files        │                                           │                │
-│◫ │ ▸ src/       │            transcript                     │  ether         │
-│⬡ │ ▸ tests/     │                                           │ ╭────────────╮ │
-│◷ │ ▸ README.md  │                                           │ ╰────────────╯ │
-│⟳ ├──────────────┴───────────────────────────────────────────┴────────────────┤
-│≡ │ CWD …  TOK ↑45k ↓23k  COST $0.052  QUEUE …  UP 2m07s  MSG 51  TOOL 49    │
+│▤ │  ▄▄▄▄ ▄▄▄ ▄▄   ETHER         │ deepseek · context · $0.05│ Chat           │
+│  │  header · 3 rows of wordmark │ ▰▰▰▰▰▰▰▰▱▱ 62%           │ ╭────────────╮ │
+│◫ ├──────────────┬───────────────┴───────────────────────────┤ │ you        │ │
+│  │ Files        │                                           │ ╰────────────╯ │
+│✦ │ ▸ src/       │            transcript                     │                │
+│  │ ▸ tests/     │                                           │  ether         │
+│⑂ │ ▸ README.md  │                                           │ ╭────────────╮ │
+│✓ ├──────────────┴───────────────────────────────────────────┴────────────────┤
+│⚙ │ CWD …  TOK ↑45k ↓23k  COST $0.052  QUEUE …  UP 2m07s  MSG 51  TOOL 49    │
 └──┴───────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -31,22 +31,29 @@ tokens, the test harness — should transfer easily to your own chrome.
 Pi's TUI has no sidebar or header slots, so the extension does something slightly naughty: it wraps
 the fullscreen layout root. Your transcript, dock, and footer keep working untouched inside the
 wrapped layout, and the chrome lives around it. That's also why this is **fullscreen mode only** —
-regular scrollback mode has no layout root to wrap.
+regular scrollback mode has no layout root to wrap. When pi remounts the fullscreen renderer, the
+chrome reattaches with the same rails and state, so a fullscreen → regular → fullscreen switch no
+longer loses it.
 
-Deleting the one extension file gets you back to stock pi. No build step, no npm dependencies: pi
-loads the TypeScript directly through jiti, and the themes are plain JSON.
+Deleting the extension files gets you back to stock pi. No build step, no runtime npm
+dependencies: pi loads the TypeScript directly through jiti, and the themes are plain JSON. The QA
+rail fetches its browser bridge through `npx` on first use.
 
 The pieces, briefly:
 
 - **Header (7 rows)** — braille wordmark, model, context bar, live spend, input/output tokens,
   session name, uptime. Fields drop whole from the right when the terminal narrows.
-- **Taskbar (5 cols)** — an icon rail that is always visible. `◫` collapses all side rails, `✦`
-  toggles just the side chat, `⑂` toggles the GitHub rail alone, and most other icons are honest
-  about being inert.
+- **Taskbar (5 cols)** — an icon rail that is always visible. `▤` collapses or expands the Files
+  tree, `◫` collapses all side rails, `✦` toggles just the side chat, `⑂` toggles the GitHub rail
+  alone, `✓` toggles the QA rail, and `✎` toggles Notes. An open rail tints its icon blue; a closed one stays muted.
+  `⚙` sits at the bottom as a Settings placeholder.
 - **Files (24 cols)** — the session directory as a tree, auto-refreshing. Clicking a file opens the
-  preview; the tree steps aside while it's open.
+  preview; the tree steps aside while it's open. The taskbar Files icon (or `alt+6`) hides and shows
+  the rail by hand, including below the 110-column auto-hide cutoff; that choice survives resizes
+  and fullscreen switches.
 - **Preview (47 cols)** — opens in the left slot with line numbers and soft-wrapped prose or
-  Dracula-highlighted code. Refreshes on file change.
+  syntax-highlighted code (Dracula on Ether/Bluether, grayscale tokens on ETHEREX). Refreshes on
+  file change.
 - **Side chat (40 cols)** — a genuinely separate conversation with its own model. It sees its own
   history only, never the main transcript, and cannot touch your files.
 - **GitHub (38 cols)** — a read-only HUD from the connected `gh` CLI: a profile card, recent repos
@@ -55,6 +62,19 @@ The pieces, briefly:
   a FEED of trending repos with total stars and click-to-expand READMEs. Opens with `⑂` or `alt+5`,
   independent of the chat, so you can collapse whichever rail is hogging the transcript. Without
   `gh` it shows a centered "No GitHub CLI connected" notice.
+- **Notes (38 cols)** — a session-only notepad. `✎` or `alt+8` opens it; it shares the GitHub
+  slot, so opening Notes hides GitHub and vice versa. Type or paste freely; the text survives
+  closing/hiding the rail and `◫`, but is wiped on `/new`, `/resume`, `/reload`, or restart.
+  Nothing is written to disk.
+- **QA (40 cols)** — a browser-testing persona. It has an address field (localhost or any http(s)
+  URL), a paste-friendly task box, one START/STOP button, DONE/NOW/NEXT progress, and a
+  plain-English REPORT with a PASS/FAIL/BLOCKED verdict. Opening the rail focuses the first empty
+  field; if a URL is pasted into TASK with no address, START points it back to ADDRESS. RESET
+  appears after a stop or finish and clears the form, progress, report, and the run's artifacts. It
+  can enable Flutter CanvasKit's hidden accessibility tree before reading the canvas. It does not
+  read the main chat and has no shell or file tools. It shares the side-chat slot, so chat and QA are mutually exclusive;
+  GitHub remains independent. The first run fetches Playwright MCP through `npx`; Windows uses
+  Edge, other platforms use Chrome (`ETHER_QA_BROWSER` overrides the channel).
 - **Footer (4 rows)** — tokens, cost, model, queue, uptime, message and tool counts.
 
 ## Try it
@@ -72,19 +92,19 @@ npm run doctor   # checks your environment and prints what's missing
 npm run setup    # installs the chrome into your pi agent directory
 ```
 
-`setup` copies the extension, both themes, and the font, merges only `theme` into your settings, and
+`setup` copies the extensions, all themes, and the font, merges only `theme` into your settings, and
 backs up every file it replaces. It never touches your auth, sessions, or chat history.
 
 Start pi (or run `/reload` if it's already open), switch to fullscreen mode, and you're done. To set
-the other theme, run `/settings` and pick `Bluether`.
+another theme, run `/settings` and pick `Bluether` or `ETHEREX`.
 
 ```bash
 npm run restore              # undo: bring back the previous files
-npm test                     # run the eight test harnesses
+npm test                     # run the thirteen test harnesses
 npm test -- --filter keyboard
 ```
 
-Useful installer flags: `--target <dir>` installs into a sandbox, `--theme Bluether` picks the other
+Useful installer flags: `--target <dir>` installs into a sandbox, `--theme ETHEREX` picks a
 theme, `--no-theme` copies files without touching settings, `--dry-run` shows the plan without
 writing anything.
 
@@ -107,6 +127,9 @@ between rails and `esc` returns to the editor.
 | `alt+3` | Focus preview (needs an open file) |
 | `alt+4` | Focus side chat |
 | `alt+5` | Focus GitHub rail |
+| `alt+6` | Toggle the Files rail |
+| `alt+7` | Toggle the QA rail |
+| `alt+8` | Toggle the Notes rail |
 | `alt+l` | Toggle side rails (same as `◫`) |
 
 Inside a rail, arrows or `j k` move, `pgup` / `pgdn` page, `home` / `end` jump, and `enter`
@@ -117,19 +140,27 @@ activates. A few rails do more:
 - **Preview** — scrolls; `esc` closes it and hands focus back to Files.
 - **Chat** — `ctrl+↑` / `ctrl+↓` select messages, `ctrl+x` copies one, `ctrl+r` quotes it into the
   composer. `esc` clears the selection first, then leaves.
+- **QA** — click a field to edit it; `alt+enter` starts or stops; `pageUp` / `pageDown` scroll the
+  report. `esc` returns to the editor.
+- **Notes** — type or paste; `pageUp` / `pageDown` move through the note; `esc` returns to the
+  editor. The note is session-only.
 
 ## Themes
 
-Two full dark themes ship with the harness, built token-first against the real surfaces:
+Three full dark themes ship with the harness, built token-first against the real surfaces:
 
 - **Ether** — monochrome. One hue, hierarchy from lightness, with a single dark blue reserved for
   tool output, the model, and spend. Code previews use a fixed Dracula palette on the matte
   background.
 - **Bluether** — deep-space navy panels, royal structure, ice text, cyan telemetry. The creative
   second theme.
+- **ETHEREX** — true monochrome. Black panels, a pure-white main agent message, and a dimmer-white
+  ladder for folders, files, thinking, headings, and syntax. No hue anywhere; the preview uses the
+  theme's gray syntax tokens instead of Dracula.
 
-Both are 56-token files in `themes/` — read one before writing your own; they double as
-documentation. Dracula code highlighting adapts to truecolor and 256-color terminals automatically.
+All three are 56-token files in `themes/` — read one before writing your own; they double as
+documentation. The Dracula preview on Ether/Bluether, and ETHEREX's native syntax colors, adapt to
+truecolor and 256-color terminals automatically.
 
 ## Making it yours
 
@@ -148,7 +179,6 @@ The interesting seams to pull:
 Honest ones:
 
 - Fullscreen only. Regular mode has no chrome.
-- A fullscreen → regular → fullscreen switch loses the chrome until restart.
 - The layout-root wrap uses a pi-internal API (`setLayoutRoot`) and may break on a future pi
   release. `doctor.mjs` warns when it finds a pi version this wasn't tested against.
 - Side-chat history is text-only; tool calls are not persisted across restarts.
@@ -158,6 +188,24 @@ Honest ones:
 - The FEED scrapes github.com/trending (no API), so a markup change can empty it; READMEs are
   fetched only when you expand a repo and cached for the session.
 - With chat and GitHub both open, the transcript narrows; collapse either rail with `✦` or `⑂`.
+- QA shares the side-chat slot, so chat and QA cannot be visible at once.
+- Notes is session-only. Closing the rail or collapsing the layout keeps the text; `/new`,
+  `/resume`, `/reload`, or restarting pi wipes it. Nothing is persisted to disk.
+- QA accepts public websites as well as localhost. It can fill forms, log in/out with test
+  credentials, click, and verify UI. It works in an isolated browser profile, so it never inherits
+  your existing logins, and it cannot solve CAPTCHA, OTP, or magic-link email flows.
+- Navigation is gated to the supplied host and its subdomains. A local address can use loopback;
+  a public address cannot probe services on your machine. Link clicks and redirects are not a hard
+  security boundary, so don't point it at a site where an autonomous agent could do damage. Use
+  test accounts and avoid destructive actions.
+- The QA rail needs `npx` and a browser. Windows uses Edge; macOS/Linux need Chrome, or set
+  `ETHER_QA_BROWSER` to `chrome`, `msedge`, `firefox`, or `webkit`. The first run may download the
+  Playwright MCP package, and the browser is a fresh isolated profile with no existing logins.
+- QA is an LLM browser tester: it can miss things or report a false failure. The action log and
+  screenshots in `<agent-dir>/qa-artifacts` are the evidence. RESET deletes that run's artifacts.
+- Flutter CanvasKit exposes no readable text until accessibility is enabled; the QA helper does
+  that when it sees the hidden "Enable accessibility" button. Give the app a few seconds to boot
+  before expecting the tree.
 - The tests prove layout math, colors, keys, and focus. They cannot judge looks — that part needs
   your eyes.
 

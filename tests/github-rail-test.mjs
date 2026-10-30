@@ -156,7 +156,7 @@ try {
 	const baseEntries = tui.layoutRoot.entries.length;
 
 	// Open the rail from the taskbar icon.
-	clickIcon(taskbar, 19);
+	clickIcon(taskbar, 7);
 	check(tui.layoutRoot.entries.length === baseEntries + 1, "GitHub icon opens the rail");
 	const rail = findByName(tui.layoutRoot, "EtherGithubSidebar");
 	check(!!rail, "GitHub rail component is mounted");
@@ -282,10 +282,10 @@ try {
 	check(bothOpen[0].slice(62, 102).includes("● ETHER"), "chat rail stays beside it at 40 cols");
 
 	// Per-icon independence: hide chat, GitHub remains.
-	clickIcon(taskbar, 17);
+	clickIcon(taskbar, 5);
 	check(tui.layoutRoot.entries.length === baseEntries, "AI icon hides only the chat");
 	check(plainFrame().some((line) => line.includes("◢ GITHUB")), "GitHub rail survives the chat toggle");
-	clickIcon(taskbar, 17);
+	clickIcon(taskbar, 5);
 	check(tui.layoutRoot.entries.length === baseEntries + 1, "AI icon restores the chat");
 	check(plainFrame().some((line) => line.includes("● ETHER")), "chat returns beside GitHub");
 
@@ -311,14 +311,14 @@ try {
 	check(missingText.includes("not found on PATH"), "missing gh explains the cause");
 
 	// Close, then reopen with alt+5 and leave with esc.
-	clickIcon(taskbar, 19);
+	clickIcon(taskbar, 7);
 	check(tui.layoutRoot.entries.length === baseEntries, "GitHub icon collapses the rail");
 	shortcuts.get("alt+5")?.handler(ctx);
 	await waitFor(() => tui.focusedComponent === rail, "alt+5 focus");
 	check(tui.focusedComponent === rail, "alt+5 opens and focuses the GitHub rail");
 	rail.handleInput("\x1b");
 	check(tui.focusedComponent === editor, "esc returns focus to the editor");
-	clickIcon(taskbar, 19);
+	clickIcon(taskbar, 7);
 	check(tui.layoutRoot.entries.length === baseEntries, "rail closes cleanly at the end");
 } finally {
 	handlers.get("session_shutdown")?.();
