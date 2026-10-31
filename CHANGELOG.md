@@ -2,6 +2,32 @@
 
 All notable changes to the Ether Harness.
 
+## 0.2.3 — 2026-10-30
+
+### Added
+
+- New `𝞢𝝉𝜢𝜺𝜞` theme (56 tokens): electric azure (`#076BF0`) enamel and champagne gold filigree
+  over a deep blue night canvas. The wordmark, folders, frame accents, selection, and user bubbles
+  are azure; pearl text, gilded headings and functions, warm amber numbers, emerald strings,
+  amethyst types, and rose diffs keep code legible. The file is `themes/𝞢𝝉𝜢𝜺𝜞.json`; the installer
+  and doctor know about it.
+- The preview keeps `𝞢𝝉𝜢𝜺𝜞`'s native syntax palette instead of remapping to Dracula. ETHEREX
+  already did this; Ether and Bluether keep their deliberate Dracula preview.
+- New `azure-theme` harness covering schema validity, the 56-token palette, the exact #076BF0
+  accent, contrast, the azure/gold hierarchy, chrome tinting, native syntax preview, and 256-color
+  loading.
+
+### Changed
+
+- `install.mjs`, `doctor.mjs`, README, and SPEC now list four themes and fourteen harnesses.
+- Ether remains the default theme. `𝞢𝝉𝜢𝜺𝜞` is opt-in through `/settings` or
+  `--theme 𝞢𝝉𝜢𝜺𝜞`.
+- Version bumped to 0.2.3.
+
+### Verification
+
+- `npm test` — 14/14 harnesses pass.
+
 ## 0.2.2 — 2026-10-30
 
 ### Added

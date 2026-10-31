@@ -1,6 +1,6 @@
 # Ether Harness — Specification
 
-Status: **0.2.2**, tested with pi **1.4.0**. Fullscreen only.
+Status: **0.2.3**, tested with pi **1.4.0**. Fullscreen only.
 
 ## 1. Purpose
 
@@ -26,6 +26,7 @@ extensions/web-tools.ts       -> <agent-dir>/extensions/web-tools.ts
 themes/Ether.json             -> <agent-dir>/themes/Ether.json
 themes/Bluether.json          -> <agent-dir>/themes/Bluether.json
 themes/ETHEREX.json           -> <agent-dir>/themes/ETHEREX.json
+themes/𝞢𝝉𝜢𝜺𝜞.json            -> <agent-dir>/themes/𝞢𝝉𝜢𝜺𝜞.json
 assets/fonts/Isometra-*.ttf   -> <agent-dir>/assets/fonts/
 ```
 
@@ -159,8 +160,8 @@ Header: relative path (dirs `dim`, basename `text`), right side `↕` when overf
 - auto-refresh every 2 s on mtime/size change
 - long lines soft-wrap; no horizontal scroll
 - prose and unknown text: every line `dim`
-- code: `getLanguageFromPath` + `highlightCode`; Ether/Bluether remap to Dracula, ETHEREX keeps
-  its native grayscale syntax tokens
+- code: `getLanguageFromPath` + `highlightCode`; Ether/Bluether remap to Dracula, ETHEREX and
+  𝞢𝝉𝜢𝜺𝜞 keep their native syntax tokens
 
 Dracula palette used by Ether/Bluether (foreground only):
 
@@ -176,7 +177,8 @@ Dracula palette used by Ether/Bluether (foreground only):
 | added / removed | `#50fa7b` / `#ff5555` |
 
 Preview escape codes follow the theme's color mode: truecolor, or xterm-256 when the theme reports
-256 colors. ETHEREX uses the same path with its gray syntax palette.
+256 colors. ETHEREX uses the same path with its gray syntax palette, and 𝞢𝝉𝜢𝜺𝜞 with its
+azure, gold, emerald, and amethyst palette.
 
 Keyboard: `↑↓`/`j k` one line, `pgup`/`pgdn` page, `home`/`end` top/bottom, `esc` close and return focus to Files (or the editor below 110 cols), `tab` cycle.
 
@@ -390,7 +392,7 @@ Mouse behavior is unchanged; clicks do not take focus except the chat composer.
 
 ## 12. Themes
 
-All three are 56-token dark themes.
+All four are 56-token dark themes.
 
 Ether: one hue (`245`), saturation ≤ ~11%, hierarchy by lightness. `accent` near-white, `muted`/`dim` for secondary text, matte `#040405` tool panels, tool blue `#3a7bcb`. Reasoning text `okhsl(245 4% 36%)`.
 
@@ -402,7 +404,10 @@ ETHEREX: strict grayscale with no hue. `text` (`#ffffff`) is the main agent mess
 ladder of grays. The preview skips the Dracula remap for ETHEREX so code stays monochrome. The
 header cost/model accent and side-chat user bubble use theme tokens rather than fixed blue.
 
+𝞢𝝉𝜢𝜺𝜞: electric azure (`#076BF0`) over a deep blue night canvas (`#020814`). `accent` is the requested azure (`#076BF0`), `toolTitle` a lighter azure (`#5b9df8`) for folders and chrome, `text` pearl ice (`#e8f1ff`), and user bubbles/selection are deep azure panels (`#0a2f6b` / `#0b3d8c`). Champagne gold carries headings and functions, amber (`#f6b26b`) carries numbers, and gold (`#f2c66d`) carries warnings; emerald strings, amethyst types, rose diffs, and steel/slate secondary text complete the jewel palette. The preview keeps these native syntax tokens instead of the Dracula remap.
+
 Theme files are installed to `<agent-dir>/themes/`. Selection lives in `settings.json` → `theme`.
+Ether is the default; Bluether, ETHEREX, and 𝞢𝝉𝜢𝜺𝜞 are opt-in.
 
 ## 13. Animation and wordmark
 
@@ -425,6 +430,7 @@ Wordmark pipeline: Isometra Regular 400 → PowerShell `System.Drawing` at 96 px
 | `left-preview` | left slot geometry, 36-col chat, 131↔132 cutoff, close |
 | `prose-preview` | dim prose, no blue bleed, Dracula truecolor and 256-color |
 | `mono-theme` | ETHEREX 56-token grayscale palette, white agent text/dimmer folder-file-thinking ladder, monochrome chrome and code preview |
+| `azure-theme` | 𝞢𝝉𝜢𝜺𝜞 schema validity, 56-token azure/gold jewel palette, exact #076BF0 accent, contrast, azure chrome, native syntax preview, 256-color load |
 | `keyboard` | shortcuts, focus cycle, taskbar/Files/preview/chat keys, notices |
 | `github-rail` | click/alt+5 toggles, gh sync, identity/repos/activity, auth and missing-binary states, both-rail layout |
 | `files-rail` | Files icon placement, width override, layout toggle state, `alt+6`, focus, renderer reattachment |
@@ -442,8 +448,8 @@ not judge aesthetics, real terminal key delivery, or browser flakiness.
   resolves on Windows and the brew binary on macOS. `ETHER_GH_BIN` overrides the command.
 - Tests resolve `PI_ROOT`; they must not hardcode a machine path.
 - Side-chat config honors `ETHER_CHAT_CONFIG` and `PI_CODING_AGENT_DIR`.
-- Preview output honors theme color mode (truecolor / 256-color); ETHEREX keeps its gray syntax
-  tokens instead of the Dracula remap.
+- Preview output honors theme color mode (truecolor / 256-color); ETHEREX and 𝞢𝝉𝜢𝜺𝜞 keep their
+  own syntax tokens instead of the Dracula remap.
 - Clipboard: macOS `pbcopy`, Windows `clip`, Linux `wl-copy`/`xclip`/`xsel`, OSC 52 fallback.
 - QA browser: Windows defaults to Edge; other platforms use the Playwright MCP Chrome channel or
   `ETHER_QA_BROWSER`. The first run may download the MCP package. The browser profile is isolated.

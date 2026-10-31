@@ -52,8 +52,8 @@ The pieces, briefly:
   the rail by hand, including below the 110-column auto-hide cutoff; that choice survives resizes
   and fullscreen switches.
 - **Preview (47 cols)** — opens in the left slot with line numbers and soft-wrapped prose or
-  syntax-highlighted code (Dracula on Ether/Bluether, grayscale tokens on ETHEREX). Refreshes on
-  file change.
+  syntax-highlighted code (Dracula on Ether/Bluether; native syntax on ETHEREX and
+  𝞢𝝉𝜢𝜺𝜞). Refreshes on file change.
 - **Side chat (40 cols)** — a genuinely separate conversation with its own model. It sees its own
   history only, never the main transcript, and cannot touch your files.
 - **GitHub (38 cols)** — a read-only HUD from the connected `gh` CLI: a profile card, recent repos
@@ -96,15 +96,15 @@ npm run setup    # installs the chrome into your pi agent directory
 backs up every file it replaces. It never touches your auth, sessions, or chat history.
 
 Start pi (or run `/reload` if it's already open), switch to fullscreen mode, and you're done. To set
-another theme, run `/settings` and pick `Bluether` or `ETHEREX`.
+another theme, run `/settings` and pick `Bluether`, `ETHEREX`, or `𝞢𝝉𝜢𝜺𝜞`.
 
 ```bash
 npm run restore              # undo: bring back the previous files
-npm test                     # run the thirteen test harnesses
+npm test                     # run the fourteen test harnesses
 npm test -- --filter keyboard
 ```
 
-Useful installer flags: `--target <dir>` installs into a sandbox, `--theme ETHEREX` picks a
+Useful installer flags: `--target <dir>` installs into a sandbox, `--theme 𝞢𝝉𝜢𝜺𝜞` picks a
 theme, `--no-theme` copies files without touching settings, `--dry-run` shows the plan without
 writing anything.
 
@@ -147,7 +147,7 @@ activates. A few rails do more:
 
 ## Themes
 
-Three full dark themes ship with the harness, built token-first against the real surfaces:
+Four full dark themes ship with the harness, built token-first against the real surfaces:
 
 - **Ether** — monochrome. One hue, hierarchy from lightness, with a single dark blue reserved for
   tool output, the model, and spend. Code previews use a fixed Dracula palette on the matte
@@ -157,10 +157,16 @@ Three full dark themes ship with the harness, built token-first against the real
 - **ETHEREX** — true monochrome. Black panels, a pure-white main agent message, and a dimmer-white
   ladder for folders, files, thinking, headings, and syntax. No hue anywhere; the preview uses the
   theme's gray syntax tokens instead of Dracula.
+- **𝞢𝝉𝜢𝜺𝜞** — electric azure (`#076BF0`) enamel and champagne gold filigree over a deep blue
+  night canvas. The wordmark, folders, frame accents, selections, and user bubbles are azure;
+  headings and functions are gilded, numbers glow amber, and warnings turn gold. Pearl text,
+  amethyst types, emerald strings, and rose diffs keep the code legible. The preview keeps the
+  theme's own jewel syntax instead of Dracula.
 
-All three are 56-token files in `themes/` — read one before writing your own; they double as
-documentation. The Dracula preview on Ether/Bluether, and ETHEREX's native syntax colors, adapt to
-truecolor and 256-color terminals automatically.
+All four are 56-token files in `themes/` — read one before writing your own; they double as
+documentation. Ether stays the default; the other three are opt-in. The Dracula preview on
+Ether/Bluether and the native syntax on ETHEREX and 𝞢𝝉𝜢𝜺𝜞 adapt to truecolor and 256-color
+terminals automatically.
 
 ## Making it yours
 

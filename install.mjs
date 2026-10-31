@@ -7,7 +7,7 @@
  * choice, or side-chat history.
  *
  * Usage:
- *   node install.mjs [--target DIR] [--theme Ether|Bluether|ETHEREX] [--no-theme] [--dry-run]
+ *   node install.mjs [--target DIR] [--theme Ether|Bluether|ETHEREX|𝞢𝝉𝜢𝜺𝜞] [--no-theme] [--dry-run]
  *   node install.mjs restore [--target DIR] [--from TIMESTAMP] [--dry-run]
  *
  * `--target` defaults to $PI_CODING_AGENT_DIR, then ~/.pi/agent.
@@ -37,6 +37,7 @@ const FILES = [
 	["themes/Ether.json", "themes/Ether.json"],
 	["themes/Bluether.json", "themes/Bluether.json"],
 	["themes/ETHEREX.json", "themes/ETHEREX.json"],
+	["themes/𝞢𝝉𝜢𝜺𝜞.json", "themes/𝞢𝝉𝜢𝜺𝜞.json"],
 	["assets/fonts/Isometra-Regular.ttf", "assets/fonts/Isometra-Regular.ttf"],
 ];
 

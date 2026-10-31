@@ -123,6 +123,8 @@ const DRACULA = {
 	added: "#50fa7b",
 	removed: "#ff5555",
 } as const;
+/** Themes whose syntax tokens are designed for the preview, so no Dracula remap. */
+const NATIVE_SYNTAX_THEMES = new Set(["ETHEREX", "𝞢𝝉𝜢𝜺𝜞"]);
 const CHAT_PLACEHOLDER = "type here…";
 /** Per-message actions: copy the body, or load it into the composer as a reply. */
 const CHAT_COPY_ICON = "⧉";
@@ -2344,9 +2346,11 @@ class EtherPreviewSidebar implements Component {
 			let rendered: string[];
 			if (lang) {
 				const highlighted = highlightCode(expanded.join("\n"), lang);
-				// Color themes keep the deliberate Dracula preview; the monochrome
-				// theme uses its own grayscale syntax tokens instead.
-				rendered = theme.name === "ETHEREX" ? highlighted : this.remapDracula(theme, highlighted);
+				// Ether and Bluether keep the deliberate Dracula preview. ETHEREX
+				// and 𝞢𝝉𝜢𝜺𝜞 carry their own syntax palettes, so use them untouched.
+				rendered = NATIVE_SYNTAX_THEMES.has(theme.name ?? "")
+					? highlighted
+					: this.remapDracula(theme, highlighted);
 				if (rendered.length !== expanded.length) {
 					rendered = expanded.map(paintProse);
 				}

@@ -84,6 +84,7 @@ for (const relative of [
 	"themes/Ether.json",
 	"themes/Bluether.json",
 	"themes/ETHEREX.json",
+	"themes/𝞢𝝉𝜢𝜺𝜞.json",
 	"assets/fonts/Isometra-Regular.ttf",
 	"assets/fonts/OFL.txt",
 ]) {
@@ -93,7 +94,7 @@ for (const relative of [
 }
 
 // Themes
-for (const name of ["Ether", "Bluether", "ETHEREX"]) {
+for (const name of ["Ether", "Bluether", "ETHEREX", "𝞢𝝉𝜢𝜺𝜞"]) {
 	const theme = readJson(join(ROOT, "themes", `${name}.json`));
 	if (!theme) {
 		fail(`themes/${name}.json is not valid JSON`);
